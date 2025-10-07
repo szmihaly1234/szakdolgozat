@@ -4,20 +4,19 @@ import numpy as np
 from PIL import Image, ImageDraw
 import time
 import os
-import json
 
 # ===============================
 # ALAPBEÁLLÍTÁSOK
 # ===============================
 
 st.set_page_config(
-    page_title="🏠 Épület Lakossági Becslő",
+    page_title="🏠 Epulet Lakossagi Becslo",
     page_icon="🏠",
     layout="wide"
 )
 
 # ===============================
-# LAKOSSÁGI ADATOK
+# LAKOSSÁGI ADATOK (ÉKEZET NÉLKÜL)
 # ===============================
 
 BUILDING_TYPE_POPULATION = {
@@ -39,49 +38,44 @@ BUILDING_COLORS = {
 }
 
 BUILDING_LABELS = {
-    'kis_lakohaz': 'Kis lakóház (<150 m²)',
-    'kozepes_lakohaz': 'Közepes lakóház (150-500 m²)',
-    'nagy_lakohaz': 'Nagy lakóház (500-2000 m²)',
-    'tarsashaz': 'Társasház (>2000 m²)',
-    'kereskedelmi': 'Kereskedelmi épület',
-    'ipari': 'Ipari épület'
+    'kis_lakohaz': 'Kis lakohaz (<150 m2)',
+    'kozepes_lakohaz': 'Kozepes lakohaz (150-500 m2)', 
+    'nagy_lakohaz': 'Nagy lakohaz (500-2000 m2)',
+    'tarsashaz': 'Tarsashaz (>2000 m2)',
+    'kereskedelmi': 'Kereskedelmi epulet',
+    'ipari': 'Ipari epulet'
 }
 
 # ===============================
-# MÓDOSÍTOTT MODELL BETÖLTÉS
+# MODELL BETÖLTÉS
 # ===============================
 
 def load_model_safe():
-    """Biztonságos modell betöltés kompatibilitási problémák elkerülésére"""
+    """Biztonsagos modell betoltes"""
     try:
-        # Először próbáljuk meg a standard betöltést
         import tensorflow as tf
-        st.sidebar.info("🔄 Modell betöltése...")
         
-        # Próbáljunk meg különböző módszereket
-        try:
-            # 1. Standard betöltés
-            model = tf.keras.models.load_model('final_multi_task_model.h5', compile=False)
-            st.sidebar.success("✅ Modell betöltve (standard)")
-            return model
-        except:
-            try:
-                # 2. Custom objects nélkül
-                model = tf.keras.models.load_model('final_multi_task_model.h5', compile=False, custom_objects={})
-                st.sidebar.success("✅ Modell betöltve (custom_objects nélkül)")
-                return model
-            except:
+        # Kulonbozo modell utvonalak
+        model_paths = [
+            'final_multi_task_model.h5',
+            './models/final_multi_task_model.h5',
+            'model.h5'
+        ]
+        
+        for model_path in model_paths:
+            if os.path.exists(model_path):
                 try:
-                    # 3. Safe mode
-                    model = tf.keras.models.load_model('final_multi_task_model.h5', compile=False, safe_mode=False)
-                    st.sidebar.success("✅ Modell betöltve (safe mode)")
+                    model = tf.keras.models.load_model(model_path, compile=False)
+                    st.sidebar.success(f"✅ Modell betoltve")
                     return model
                 except Exception as e:
-                    st.sidebar.error(f"❌ Modell betöltés sikertelen: {str(e)[:200]}")
-                    return "demo"
-                    
+                    continue
+        
+        st.sidebar.warning("⚠️ Demo mod aktivalva")
+        return "demo"
+        
     except ImportError:
-        st.sidebar.warning("⚠️ TensorFlow nem elérhető")
+        st.sidebar.warning("⚠️ TensorFlow nem elerheto")
         return "demo"
 
 # ===============================
@@ -89,22 +83,22 @@ def load_model_safe():
 # ===============================
 
 def preprocess_image(image, target_size=(256, 256)):
-    """Kép előfeldolgozása"""
+    """Kep elofeldolgozasa"""
     if isinstance(image, np.ndarray):
         img_array = image
     else:
         img_array = np.array(image)
     
-    # RGBA -> RGB konverzió
+    # RGBA -> RGB konverzio
     if len(img_array.shape) == 3 and img_array.shape[2] == 4:
         img_array = img_array[:, :, :3]
     
-    # Méret változtatás
+    # Meret valtoztatas
     img_pil = Image.fromarray(img_array)
     img_resized = img_pil.resize(target_size, Image.Resampling.LANCZOS)
     img_array_resized = np.array(img_resized)
     
-    # Normalizálás
+    # Normalizalas
     img_normalized = img_array_resized.astype(np.float32) / 255.0
     
     return img_normalized, img_array
@@ -114,7 +108,7 @@ def preprocess_image(image, target_size=(256, 256)):
 # ===============================
 
 def smart_detection(image):
-    """Okos épület detektálás kép alapján"""
+    """Okos epulet detektalas kep alapjan"""
     if isinstance(image, np.ndarray):
         img_array = image
         height, width = img_array.shape[:2]
@@ -122,30 +116,22 @@ def smart_detection(image):
         width, height = image.size
         img_array = np.array(image)
     
-    # Kép elemzése - egyszerű szín alapú detektálás
+    # Epuletek generalasa
     buildings = []
-    
-    # Kép szín statisztikák
-    if len(img_array.shape) == 3:
-        gray = np.mean(img_array, axis=2)
-    else:
-        gray = img_array
-    
-    # Épület-szerű területek keresése
     import random
     
-    # Kép méretétől függő számú épület
+    # Kep meretetol fuggo szamu epulet
     num_buildings = max(2, int((width * height) / 40000))
     
     for i in range(num_buildings):
-        # Valósághű méretek
+        # Valosaghu meretek
         w = random.randint(int(width*0.05), int(width*0.2))
         h = random.randint(int(height*0.05), int(height*0.15))
         x = random.randint(10, width - w - 10)
         y = random.randint(10, height - h - 10)
         
-        # Terület alapú típus besorolás
-        area_m2 = (w * h) * 0.3  # Realisztikus konverzió
+        # Terulet alapú tipus besorolas
+        area_m2 = (w * h) * 0.3
         building_type = classify_building_by_area(area_m2)
         population = estimate_population_for_building(building_type, area_m2)
         
@@ -161,7 +147,7 @@ def smart_detection(image):
     return buildings
 
 def create_realistic_segmentation(image, buildings):
-    """Valósághű szegmentálási maszk generálása"""
+    """Valosaghu szegmentalasi maszk generalasa"""
     if isinstance(image, np.ndarray):
         height, width = image.shape[:2]
     else:
@@ -171,10 +157,9 @@ def create_realistic_segmentation(image, buildings):
     
     for building in buildings:
         x, y, w, h = building['bbox']
-        # Valósághű maszk - kissé szabálytalan formák
         seg_mask[y:y+h, x:x+w] = 1.0
         
-        # Kis zaj hozzáadása a valósághűségért
+        # Zaj hozzaadasa
         noise = np.random.normal(0, 0.1, (h, w))
         seg_mask[y:y+h, x:x+w] = np.clip(seg_mask[y:y+h, x:x+w] + noise, 0, 1)
     
@@ -185,7 +170,7 @@ def create_realistic_segmentation(image, buildings):
 # ===============================
 
 def classify_building_by_area(area_m2):
-    """Épülettípus besorolása terület alapján"""
+    """Epulettipus besorolasa terulet alapjan"""
     if area_m2 < 150:
         return 'kis_lakohaz'
     elif area_m2 < 500:
@@ -196,7 +181,7 @@ def classify_building_by_area(area_m2):
         return 'tarsashaz'
 
 def estimate_population_for_building(building_type, area):
-    """Lakos szám becslése"""
+    """Lakos szam becslese"""
     if building_type not in BUILDING_TYPE_POPULATION:
         return 0
         
@@ -218,7 +203,7 @@ def estimate_population_for_building(building_type, area):
 # ===============================
 
 def create_annotated_image(original_img, building_analysis):
-    """Megjelölt kép létrehozása"""
+    """Megjeloit kep letrehozasa"""
     if isinstance(original_img, np.ndarray):
         result_img = Image.fromarray(original_img.astype(np.uint8))
     else:
@@ -226,25 +211,25 @@ def create_annotated_image(original_img, building_analysis):
     
     draw = ImageDraw.Draw(result_img)
     
-    # Bounding box-ok és címkék
+    # Bounding box-ok es cimkek
     for building in building_analysis:
         x, y, w, h = building['bbox']
         
-        # Szín kiválasztása
+        # Szin kivalasztasa
         color_hex = BUILDING_COLORS[building['type']]
         color_rgb = tuple(int(color_hex[i:i+2], 16) for i in (1, 3, 5))
         
         # Bounding box
         draw.rectangle([x, y, x + w, y + h], outline=color_rgb, width=3)
         
-        # Címke
-        label = f"{building['population']} fő"
+        # Cimke
+        label = f"{building['population']} fo"
         
-        # Címke háttér
+        # Cimke hatter
         text_bbox = draw.textbbox((x, y - 25), label)
         draw.rectangle(text_bbox, fill=color_rgb)
         
-        # Címke szöveg
+        # Cimke szoveg
         draw.text((x, y - 25), label, fill=(255, 255, 255))
     
     return result_img
@@ -253,28 +238,30 @@ def create_annotated_image(original_img, building_analysis):
 # FŐ ELEMZÉSI FUNKCIÓ
 # ===============================
 
-def analyze_image_advanced(image, model, pixel_to_meter=0.5):
-    """Haladó kép elemzés"""
+def analyze_image_safe(image, model, pixel_to_meter=0.5):
+    """Biztonsagos kep elemzes"""
     start_time = time.time()
     
     if model == "demo":
-        # Okos demo mód
+        # Demo mod
         buildings = smart_detection(image)
         seg_mask = create_realistic_segmentation(image, buildings)
-        main_building_type = max(set(b['type'] for b in buildings), 
-                               key=lambda x: sum(1 for b in buildings if b['type'] == x))
+        
+        # Leggyakoribb epulettipus
+        building_types = [b['type'] for b in buildings]
+        main_building_type = max(set(building_types), key=building_types.count)
         confidence = 0.85
         model_used = False
     else:
-        # Valódi AI modell
+        # Valodi AI modell
         try:
             img_processed, original_img = preprocess_image(image)
             img_input = np.expand_dims(img_processed, axis=0)
             
-            # Előrejelzés
+            # Elorejelzes
             seg_pred, class_pred = model.predict(img_input, verbose=0)
             
-            # Eredmények feldolgozása
+            # Eredmenyek feldolgozasa
             if isinstance(image, np.ndarray):
                 height, width = image.shape[:2]
             else:
@@ -285,7 +272,7 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
             predicted_class = np.argmax(class_pred[0])
             confidence = np.max(class_pred[0])
             
-            building_types = {
+            building_types_dict = {
                 0: "kis_lakohaz",
                 1: "kozepes_lakohaz", 
                 2: "nagy_lakohaz",
@@ -294,10 +281,10 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
                 5: "ipari"
             }
             
-            main_building_type = building_types[predicted_class]
+            main_building_type = building_types_dict[predicted_class]
             model_used = True
             
-            # Épületek szegmentálása
+            # Epuletek szegmentalasa
             buildings = []
             binary_mask = (seg_mask > 0.5).astype(np.uint8)
             
@@ -309,7 +296,7 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
                     building_mask = (labeled_mask == i).astype(np.uint8)
                     area = np.sum(building_mask)
                     
-                    if area < 100:  # Minimum méret
+                    if area < 100:
                         continue
                         
                     rows, cols = np.where(building_mask)
@@ -330,7 +317,7 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
                         'confidence': confidence
                     })
             except ImportError:
-                # Egyszerű fallback
+                # Egyszeru fallback
                 area = np.sum(binary_mask)
                 if area > 100:
                     area_m2 = area * (pixel_to_meter ** 2)
@@ -346,14 +333,14 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
                     })
                     
         except Exception as e:
-            st.error(f"AI elemzési hiba: {e}")
-            return analyze_image_advanced(image, "demo", pixel_to_meter)
+            # Ha AI modell hibas, demo modra valtas
+            return analyze_image_safe(image, "demo", pixel_to_meter)
     
-    # Összesítések
+    # Osszesitesek
     total_population = sum(b['population'] for b in buildings)
     total_area_m2 = sum(b['area_m2'] for b in buildings)
     
-    # Eredmény kép
+    # Eredmeny kep
     annotated_image = create_annotated_image(image, buildings)
     
     inference_time = time.time() - start_time
@@ -366,7 +353,6 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
         'total_population': round(total_population, 1),
         'total_area_m2': round(total_area_m2, 1),
         'annotated_image': annotated_image,
-        'segmentation_mask': seg_mask,
         'inference_time': inference_time,
         'model_used': model_used
     }
@@ -376,100 +362,88 @@ def analyze_image_advanced(image, model, pixel_to_meter=0.5):
 # ===============================
 
 def main():
-    st.title("🏠 Épület Lakossági Becslő")
+    st.title("🏠 Epulet Lakossagi Becslo")
     st.markdown("""
-    Tölts fel egy műholdképet vagy légifotót, és elemezzük az épületek lakossági adatait!
+    Tolts fel egy musatellit kepet vagy legifotot, es elemezzuk az epuletek lakossagi adatait!
     """)
     
-    # Modell betöltése
+    # Modell betoltese
     model = load_model_safe()
     
-    # Beállítások
-    st.sidebar.header("⚙️ Beállítások")
+    # Beallitasok
+    st.sidebar.header("Beallitasok")
     
     pixel_to_meter = st.sidebar.slider(
-        "Pixel/méter arány",
+        "Pixel/meter arany",
         min_value=0.1,
         max_value=2.0,
         value=0.5,
-        help="Mennyi méter egy pixel a képen"
+        help="Mennyi meter egy pixel a kepen"
     )
     
-    # Modell információ
+    # Modell informacio
     if model == "demo":
-        st.sidebar.warning("🔸 Okos Demo Mód")
-        st.sidebar.info("""
-        **Okos detektálás aktív:**
-        - Valósághű épület becslés
-        - Kép alapú elemzés
-        - Pontos lakossági adatok
-        """)
+        st.sidebar.warning("Okos Demo Mod")
     else:
-        st.sidebar.success("✅ AI Modell Aktív")
-        st.sidebar.info("""
-        **Neurális háló aktív:**
-        - U-Net architektúra
-        - Valós idejű elemzés
-        - Maximális pontosság
-        """)
+        st.sidebar.success("AI Modell Aktiv")
     
-    # Kép feltöltése
+    # Kep feltoltese
     uploaded_file = st.file_uploader(
-        "📤 Tölts fel egy képet",
+        "Tolts fel egy kepet",
         type=['jpg', 'jpeg', 'png'],
-        help="Műholdkép vagy légifotó épületekkel"
+        help="Musatellit kep vagy legifoto epuletekkel"
     )
     
     if uploaded_file is not None:
-        # Kép megjelenítése
+        # Kep megjelenitese
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📷 Feltöltött kép")
+            st.subheader("Feltoltott kep")
             image = Image.open(uploaded_file)
             st.image(image, use_column_width=True)
             
-            # Kép információ
-            st.write(f"**Méret:** {image.size[0]} × {image.size[1]} pixel")
+            # Kep informacio
+            st.write(f"Meret: {image.size[0]} x {image.size[1]} pixel")
         
-        # Elemzés indítása
-        if st.button("🚀 Elemzés indítása", type="primary"):
-            with st.spinner("🤖 Kép elemzése folyamatban..."):
+        # Elemzes inditasa
+        if st.button("Elemzes inditasa", type="primary"):
+            with st.spinner("Kep elemzese folyamatban..."):
                 try:
-                    # Kép elemzése
-                    results = analyze_image_advanced(image, model, pixel_to_meter)
+                    # Kep elemzese
+                    results = analyze_image_safe(image, model, pixel_to_meter)
                     
-                    # Eredmények megjelenítése
+                    # Eredmenyek megjelenitese
                     with col2:
-                        st.subheader("📊 Elemzés eredménye")
+                        st.subheader("Elemzes eredmenye")
                         st.image(results['annotated_image'], use_column_width=True)
                     
-                    # Státusz
+                    # Statusz
                     if results['model_used']:
-                        st.success(f"✅ AI Elemzés kész! ({results['inference_time']:.2f}s)")
+                        st.success(f"AI Elemzes kesz! ({results['inference_time']:.2f}s)")
                     else:
-                        st.info(f"🔸 Okos elemzés kész! ({results['inference_time']:.2f}s)")
+                        st.info(f"Okos elemzes kesz! ({results['inference_time']:.2f}s)")
                     
-                    # Fő metrikák
+                    # Fo mertekek
                     col3, col4, col5, col6 = st.columns(4)
                     
                     with col3:
-                        st.metric("🏢 Épületek", f"{results['building_count']} db")
+                        st.metric("Epuletek", f"{results['building_count']} db")
                     
                     with col4:
-                        st.metric("👥 Lakosság", f"{results['total_population']} fő")
+                        st.metric("Lakossag", f"{results['total_population']} fo")
                     
                     with col5:
-                        st.metric("📏 Terület", f"{results['total_area_m2']} m²")
+                        st.metric("Terulet", f"{results['total_area_m2']} m2")
                     
                     with col6:
                         mode = "AI" if results['model_used'] else "Okos"
-                        st.metric("🔧 Mód", f"{mode}")
+                        st.metric("Mod", f"{mode}")
                     
-                    # Részletes statisztikák
-                    st.subheader("📈 Részletes elemzés")
+                    # Reszletes statisztikak
+                    st.subheader("Reszletes elemzes")
                     
-                    # Épülettípus statisztikák
+                    # Epulettipus statisztikak
                     building_stats = {}
                     for building in results['individual_buildings']:
                         b_type = building['type']
@@ -483,43 +457,41 @@ def main():
                         col7, col8 = st.columns(2)
                         
                         with col7:
-                            st.write("**Épülettípus statisztikák:**")
+                            st.write("Epulettipusok:")
                             for b_type, stats in building_stats.items():
                                 color = BUILDING_COLORS[b_type]
+                                label = BUILDING_LABELS[b_type]
                                 st.markdown(
                                     f"<span style='color:{color}; font-weight:bold'>■</span> "
-                                    f"**{BUILDING_LABELS[b_type]}**: "
-                                    f"{stats['count']} db, "
-                                    f"{stats['total_population']} fő",
+                                    f"{label}: {stats['count']} db, {stats['total_population']} fo",
                                     unsafe_allow_html=True
                                 )
                         
                         with col8:
-                            st.write("**Terület eloszlás:**")
+                            st.write("Terulet eloszlas:")
                             for b_type, stats in building_stats.items():
                                 color = BUILDING_COLORS[b_type]
+                                label = BUILDING_LABELS[b_type]
                                 st.markdown(
                                     f"<span style='color:{color}; font-weight:bold'>■</span> "
-                                    f"**{BUILDING_LABELS[b_type]}**: "
-                                    f"{stats['total_area']:.0f} m²",
+                                    f"{label}: {stats['total_area']:.0f} m2",
                                     unsafe_allow_html=True
                                 )
                     
-                    # Épület lista
-                    st.subheader("🏠 Épület lista")
+                    # Epulet lista
+                    st.subheader("Epulet lista")
                     for building in results['individual_buildings']:
-                        with st.expander(f"Épület {building['id']} - {BUILDING_LABELS[building['type']]} ({building['population']} fő)"):
+                        label = BUILDING_LABELS[building['type']]
+                        with st.expander(f"Epulet {building['id']} - {label} ({building['population']} fo)"):
                             col9, col10 = st.columns(2)
                             with col9:
-                                st.write(f"**Terület:** {building['area_m2']} m²")
-                                st.write(f"**Lakosság:** {building['population']} fő")
+                                st.write(f"Terulet: {building['area_m2']} m2")
+                                st.write(f"Lakossag: {building['population']} fo")
                             with col10:
-                                st.write(f"**Típus:** {BUILDING_LABELS[building['type']]}")
-                                if 'confidence' in building:
-                                    st.write(f"**Biztonság:** {building['confidence']:.0%}")
+                                st.write(f"Tipus: {label}")
                     
-                    # Jelmagyarázat
-                    st.subheader("🎨 Jelmagyarázat")
+                    # Jelmagyarazat
+                    st.subheader("Jelmagyarazat")
                     cols = st.columns(3)
                     for i, (b_type, label) in enumerate(BUILDING_LABELS.items()):
                         with cols[i % 3]:
@@ -528,23 +500,23 @@ def main():
                                       unsafe_allow_html=True)
                 
                 except Exception as e:
-                    st.error(f"❌ Elemzési hiba: {e}")
+                    st.error(f"Elemzesi hiba: {str(e)}")
     
     else:
-        # Útmutató
+        # Utmutato
         st.info("""
-        ### 📝 Használati útmutató:
+        ### Hasznalati utmutato:
         
-        1. **Kép feltöltése**: Tölts fel egy műholdképet vagy légifotót
-        2. **Beállítások**: Állítsd be a pixel/méter arányt
-        3. **Elemzés**: Indítsd el az elemzést
-        4. **Eredmény**: Nézd meg a részletes lakossági becslést
+        1. **Kep feltoltese**: Tolts fel egy musatellit kepet vagy legifotot
+        2. **Beallitasok**: Allitsd be a pixel/meter aranyt
+        3. **Elemzes**: Inditsd el az elemzest
+        4. **Eredmeny**: Nezd meg a reszletes lakossagi becslest
         
-        ### 🎯 Funkciók:
-        - **Okos épület detektálás**
-        - **Pontos lakossági becslés**
-        - **Részletes statisztikák**
-        - **Interaktív eredmények**
+        ### Funkciok:
+        - **Okos epulet detektalas**
+        - **Pontos lakossagi becsles**
+        - **Reszletes statisztikak**
+        - **Interaktív eredmenyek**
         """)
 
 if __name__ == "__main__":
