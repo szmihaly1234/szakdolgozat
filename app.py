@@ -1,383 +1,438 @@
-# app.py
+# ===============================
+# STREAMLIT ÉPÜLET ANALIZÁTOR ALKALMAZÁS
+# Python 3.10 + TensorFlow 2.14 kompatibilis
+# ===============================
+
 import streamlit as st
+import tensorflow as tf
+from tensorflow.keras import layers, models, backend as K
 import numpy as np
-from PIL import Image, ImageDraw
+import cv2
+import matplotlib.pyplot as plt
+from PIL import Image
+import io
 import time
 import os
-import sys
 
-st.set_page_config(page_title="🏠 Epulet Lakossagi Becslo", page_icon="🏠", layout="wide")
+# Streamlit oldal beállítások
+st.set_page_config(
+    page_title="Épület Analizátor",
+    page_icon="🏠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# LAKOSSÁGI ADATOK
+# ===============================
+# LAKOSSÁGI ADATOK ÉPÜLETTÍPUSONKÉNT
+# ===============================
+
 BUILDING_TYPE_POPULATION = {
-    'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1, 
-    'tarsashaz': 45, 'kereskedelmi': 0, 'ipari': 0
+    'kis_lakohaz': 2.9,      # átlagos háztartásméret
+    'kozepes_lakohaz': 3.2,  # nagyobb családok
+    'nagy_lakohaz': 4.1,     # többgenerációs
+    'tarsashaz': 45,         # átlagos lakószám társasházban
+    'kereskedelmi': 0,       # nem lakóépület
+    'ipari': 0               # nem lakóépület
 }
 
 BUILDING_COLORS = {
-    'kis_lakohaz': '#00FF00', 'kozepes_lakohaz': '#FFFF00', 'nagy_lakohaz': '#FFA500',
-    'tarsashaz': '#FF0000', 'kereskedelmi': '#0000FF', 'ipari': '#800080'
+    'kis_lakohaz': [0, 255, 0],      # zöld
+    'kozepes_lakohaz': [255, 255, 0], # sárga
+    'nagy_lakohaz': [255, 165, 0],    # narancs
+    'tarsashaz': [255, 0, 0],         # piros
+    'kereskedelmi': [0, 0, 255],      # kék
+    'ipari': [128, 0, 128]            # lila
 }
 
-BUILDING_LABELS = {
-    'kis_lakohaz': 'Kis lakohaz (<150 m2)', 'kozepes_lakohaz': 'Kozepes lakohaz (150-500 m2)', 
-    'nagy_lakohaz': 'Nagy lakohaz (500-2000 m2)', 'tarsashaz': 'Tarsashaz (>2000 m2)',
-    'kereskedelmi': 'Kereskedelmi epulet', 'ipari': 'Ipari epulet'
-}
+# ===============================
+# MODELL BETÖLTÉS ÉS ANALÍZIS
+# ===============================
 
-# MODELL BETÖLTÉS - TENSORFLOW 2.19 KOMPATIBILIS
-def load_model_advanced():
-    """Haladó modell betöltés TensorFlow 2.19 kompatibilitással"""
-    st.sidebar.header("🔧 Modell Beallitasok")
-    
-    # Verzió információk
+@st.cache_resource(show_spinner=False)
+def load_model():
+    """Modell betöltése cache-eléssel"""
     try:
-        import tensorflow as tf
-        st.sidebar.info(f"🤖 TensorFlow: {tf.__version__}")
-    except:
-        st.sidebar.warning("❌ TensorFlow nem elerheto")
-        return "demo"
-    
-    # Kompatibilis modell fájlok keresése
-    compatible_models = [
-        'final_multi_task_model_compatible.h5',  # Új konvertált modell
-        'final_multi_task_model.h5',             # Eredeti modell
-        'model_compatible.h5',
-        './models/final_multi_task_model_compatible.h5'
-    ]
-    
-    for model_path in compatible_models:
-        if os.path.exists(model_path):
-            try:
-                st.sidebar.info(f"🔄 Modell betoltese: {model_path}")
-                
-                # Különböző betöltési módszerek
-                try:
-                    # 1. Standard betöltés
-                    model = tf.keras.models.load_model(model_path, compile=False)
-                    st.sidebar.success("✅ Modell betoltve!")
-                    return model
-                except Exception as e1:
-                    try:
-                        # 2. Custom objects nélkül
-                        model = tf.keras.models.load_model(model_path, compile=False, custom_objects={})
-                        st.sidebar.success("✅ Modell betoltve (custom_objects nelkul)")
-                        return model
-                    except Exception as e2:
-                        try:
-                            # 3. Safe mode
-                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-                            st.sidebar.success("✅ Modell betoltve (safe mode)")
-                            return model
-                        except Exception as e3:
-                            st.sidebar.error(f"❌ Osszes betoltesi modszer sikertelen")
-                            continue
-                
-            except Exception as e:
-                st.sidebar.error(f"❌ {model_path}: {str(e)[:100]}...")
-                continue
-    
-    st.sidebar.error("⚠️ Nincs kompatibilis modell!")
-    return "demo"
+        # Dice coefficient és loss függvények definiálása
+        def dice_coef(y_true, y_pred):
+            smooth = 1.0
+            y_true_f = K.flatten(y_true)
+            y_pred_f = K.flatten(y_pred)
+            intersection = K.sum(y_true_f * y_pred_f)
+            return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
-# MODELL FELTÖLTÉS
-def handle_model_upload():
-    """Modell fájl feltöltés"""
-    st.sidebar.header("📤 Modell Feltoltes")
-    
-    uploaded_model = st.sidebar.file_uploader(
-        "Tolts fel modell fajlt",
-        type=['h5'],
-        help="TensorFlow .h5 modell fajl"
-    )
-    
-    if uploaded_model is not None:
-        try:
-            # Fájl mentése
-            model_path = "uploaded_model.h5"
-            with open(model_path, "wb") as f:
-                f.write(uploaded_model.getvalue())
-            
-            file_size = len(uploaded_model.getvalue()) / (1024 * 1024)
-            st.sidebar.success(f"✅ Modell feltoltve! ({file_size:.1f} MB)")
-            
-            # Betöltés
-            import tensorflow as tf
-            try:
-                model = tf.keras.models.load_model(model_path, compile=False)
-                st.sidebar.success("✅ Uj modell betoltve!")
-                return model
-            except Exception as e:
-                st.sidebar.error(f"❌ Modell betoltesi hiba: {str(e)[:100]}")
-                return "demo"
-                
-        except Exception as e:
-            st.sidebar.error(f"❌ Feltoltesi hiba: {str(e)}")
-    
-    return None
+        def dice_loss(y_true, y_pred):
+            return 1 - dice_coef(y_true, y_pred)
 
-# DEMO MODELL - OKOSABB VERZIÓ
-def smart_demo_detection(image, pixel_to_meter=0.5):
-    """Okos demo detektálás"""
-    if isinstance(image, np.ndarray):
-        height, width = image.shape[:2]
-    else:
-        width, height = image.size
+        # Modell betöltése custom objektumokkal
+        model = tf.keras.models.load_model(
+            'final_multi_task_model.h5',
+            custom_objects={
+                'dice_loss': dice_loss,
+                'dice_coef': dice_coef
+            }
+        )
+        return model
+    except Exception as e:
+        st.error(f"❌ Modell betöltési hiba: {e}")
+        return None
+
+def segment_individual_buildings(mask, min_size=100):
+    """Egyedi épületek szegmentálása connected components alapján"""
+    binary_mask = (mask > 0.5).astype(np.uint8)
     
-    import random
-    buildings = []
+    # Connected components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
     
-    # Kép méretétől függő számú épület
-    num_buildings = max(3, min(8, int((width * height) / 30000)))
+    individual_buildings = []
     
-    for i in range(num_buildings):
-        w = random.randint(int(width*0.08), int(width*0.25))
-        h = random.randint(int(height*0.08), int(height*0.20))
-        x = random.randint(20, width - w - 20)
-        y = random.randint(20, height - h - 20)
+    for i in range(1, num_labels):  # 0 a háttér
+        building_mask = (labels == i).astype(np.uint8)
+        area = stats[i, cv2.CC_STAT_AREA]
         
-        area_m2 = (w * h) * (pixel_to_meter ** 2)
-        building_type = classify_building_by_area(area_m2)
-        population = estimate_population_for_building(building_type, area_m2)
+        if area < min_size:
+            continue
+            
+        x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         
-        buildings.append({
-            'id': i + 1,
-            'type': building_type,
-            'area_m2': round(area_m2, 1),
-            'population': population,
+        individual_buildings.append({
+            'mask': building_mask,
+            'area': area,
             'bbox': (x, y, w, h),
-            'confidence': round(random.uniform(0.75, 0.95), 2)
+            'centroid': centroids[i],
+            'label': i
         })
     
-    return buildings
+    return individual_buildings
 
-# SEGÉDFÜGGVÉNYEK
-def classify_building_by_area(area_m2):
-    if area_m2 < 150: return 'kis_lakohaz'
-    elif area_m2 < 500: return 'kozepes_lakohaz'
-    elif area_m2 < 2000: return 'nagy_lakohaz'
-    else: return 'tarsashaz'
+def estimate_building_type_from_area(area_m2):
+    """Épülettípus becslése terület alapján"""
+    if area_m2 < 150:
+        return 'kis_lakohaz'
+    elif area_m2 < 500:
+        return 'kozepes_lakohaz'
+    elif area_m2 < 2000:
+        return 'nagy_lakohaz'
+    else:
+        return 'tarsashaz'
 
 def estimate_population_for_building(building_type, area):
-    if building_type not in BUILDING_TYPE_POPULATION: return 0
+    """Lakos szám becslése épülettípus és terület alapján"""
+    if building_type not in BUILDING_TYPE_POPULATION:
+        return 0
+        
     base_population = BUILDING_TYPE_POPULATION[building_type]
     
+    # Lakóépületeknél terület alapú pontosítás
     if building_type in ['kis_lakohaz', 'kozepes_lakohaz', 'nagy_lakohaz']:
-        return round(base_population * max(1, area / 100), 1)
+        estimated_apartments = max(1, area / 100)
+        population = base_population * estimated_apartments
     elif building_type == 'tarsashaz':
-        return round(base_population * max(8, area / 80) / 10, 1)
+        estimated_apartments = max(8, area / 80)
+        population = base_population * (estimated_apartments / 10)
     else:
-        return base_population
+        population = base_population
+        
+    return round(population, 1)
 
-def create_annotated_image(original_img, building_analysis):
-    if isinstance(original_img, np.ndarray):
-        result_img = Image.fromarray(original_img.astype(np.uint8))
-    else:
-        result_img = original_img.copy()
+def analyze_image_with_model(model, image, pixel_to_meter=0.5):
+    """Kép elemzése a modelllel"""
+    try:
+        # Kép előkészítése
+        original_img = np.array(image)
+        if len(original_img.shape) == 2:  # Ha fekete-fehér
+            original_img = cv2.cvtColor(original_img, cv2.COLOR_GRAY2RGB)
+        elif original_img.shape[2] == 4:  # Ha RGBA
+            original_img = cv2.cvtColor(original_img, cv2.COLOR_RGBA2RGB)
+        
+        original_shape = original_img.shape[:2]
+        
+        # Átméretezés a modell számára
+        img_resized = cv2.resize(original_img, (256, 256))
+        img_input = img_resized.astype(np.float32) / 255.0
+        img_input = np.expand_dims(img_input, axis=0)
+        
+        # Előrejelzés
+        start_time = time.time()
+        seg_pred, class_pred = model.predict(img_input, verbose=0)
+        inference_time = time.time() - start_time
+        
+        # Szegmentálás eredménye
+        seg_mask = cv2.resize(seg_pred[0,:,:,0], (original_shape[1], original_shape[0]))
+        
+        # Egyedi épületek szegmentálása
+        individual_buildings = segment_individual_buildings(seg_mask)
+        
+        # Épületenkénti elemzés
+        building_analysis = []
+        total_population = 0
+        
+        for i, building in enumerate(individual_buildings):
+            # Épület területe (m²-ben)
+            area_pixels = building['area']
+            area_m2 = area_pixels * (pixel_to_meter ** 2)
+            
+            # Épülettípus becslése terület alapján
+            building_type = estimate_building_type_from_area(area_m2)
+            
+            # Lakossági becslés
+            population = estimate_population_for_building(building_type, area_m2)
+            total_population += population
+            
+            building_analysis.append({
+                'id': i + 1,
+                'type': building_type,
+                'area_m2': round(area_m2, 1),
+                'population': population,
+                'bbox': building['bbox']
+            })
+        
+        return {
+            'success': True,
+            'original_image': original_img,
+            'segmentation_mask': seg_mask,
+            'individual_buildings': building_analysis,
+            'total_population': total_population,
+            'inference_time': inference_time,
+            'building_count': len(building_analysis)
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def create_visualization(result):
+    """Vizuális eredmények létrehozása"""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    draw = ImageDraw.Draw(result_img)
+    # Eredeti kép
+    axes[0,0].imshow(result['original_image'])
+    axes[0,0].set_title('Eredeti kép')
+    axes[0,0].axis('off')
     
-    for building in building_analysis:
+    # Szegmentálás
+    axes[0,1].imshow(result['segmentation_mask'], cmap='jet')
+    axes[0,1].set_title('Épület szegmentálás')
+    axes[0,1].axis('off')
+    
+    # Épületenkénti osztályozás
+    result_img = result['original_image'].copy()
+    
+    for building in result['individual_buildings']:
         x, y, w, h = building['bbox']
-        color_hex = BUILDING_COLORS[building['type']]
-        color_rgb = tuple(int(color_hex[i:i+2], 16) for i in (1, 3, 5))
+        color = BUILDING_COLORS.get(building['type'], [255, 255, 255])
         
-        draw.rectangle([x, y, x + w, y + h], outline=color_rgb, width=3)
-        label = f"{building['population']} fo"
-        text_bbox = draw.textbbox((x, y - 25), label)
-        draw.rectangle(text_bbox, fill=color_rgb)
-        draw.text((x, y - 25), label, fill=(255, 255, 255))
+        # Bounding box rajzolása
+        cv2.rectangle(result_img, (x, y), (x + w, y + h), color, 2)
+        
+        # Címke
+        label = f"{building['type']} ({building['population']} fő)"
+        cv2.putText(result_img, label, (x, max(y-10, 10)), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
     
-    return result_img
-
-# FŐ ELEMZÉSI FUNKCIÓ
-def analyze_image_complete(image, model, pixel_to_meter=0.5):
-    start_time = time.time()
+    axes[1,0].imshow(result_img)
+    axes[1,0].set_title(f'Épületenkénti osztályozás - Összesen: {result["total_population"]:.0f} fő')
+    axes[1,0].axis('off')
     
-    if model == "demo":
-        buildings = smart_demo_detection(image, pixel_to_meter)
-        main_building_type = max(set(b['type'] for b in buildings), key=lambda x: sum(1 for b in buildings if b['type'] == x))
-        confidence = 0.85
-        model_used = False
+    # Statisztika
+    building_types = [b['type'] for b in result['individual_buildings']]
+    type_counts = {typ: building_types.count(typ) for typ in set(building_types)}
+    
+    if type_counts:
+        colors = [BUILDING_COLORS.get(typ, [0.5, 0.5, 0.5]) for typ in type_counts.keys()]
+        # Normalizálás matplotlib számára
+        colors = [[c[0]/255, c[1]/255, c[2]/255] for c in colors]
+        
+        axes[1,1].bar(type_counts.keys(), type_counts.values(), color=colors)
+        axes[1,1].set_title('Épülettípusok eloszlása')
+        axes[1,1].set_ylabel('Darabszám')
+        axes[1,1].tick_params(axis='x', rotation=45)
     else:
-        try:
-            # Valódi AI elemzés
-            img_processed, _ = preprocess_image(image)
-            img_input = np.expand_dims(img_processed, axis=0)
-            
-            seg_pred, class_pred = model.predict(img_input, verbose=0)
-            
-            if isinstance(image, np.ndarray):
-                height, width = image.shape[:2]
-            else:
-                width, height = image.size
-                
-            seg_mask = np.array(Image.fromarray(seg_pred[0,:,:,0]).resize((width, height)))
-            predicted_class = np.argmax(class_pred[0])
-            confidence = np.max(class_pred[0])
-            
-            building_types_dict = {0: "kis_lakohaz", 1: "kozepes_lakohaz", 2: "nagy_lakohaz", 
-                                 3: "tarsashaz", 4: "kereskedelmi", 5: "ipari"}
-            main_building_type = building_types_dict[predicted_class]
-            model_used = True
-            
-            # Épületek szegmentálása
-            buildings = []
-            binary_mask = (seg_mask > 0.5).astype(np.uint8)
-            
-            try:
-                from scipy import ndimage
-                labeled_mask, num_features = ndimage.label(binary_mask)
-                
-                for i in range(1, num_features + 1):
-                    building_mask = (labeled_mask == i).astype(np.uint8)
-                    area = np.sum(building_mask)
-                    if area < 100: continue
-                    
-                    rows, cols = np.where(building_mask)
-                    y_min, y_max = np.min(rows), np.max(rows)
-                    x_min, x_max = np.min(cols), np.max(cols)
-                    w, h = x_max - x_min, y_max - y_min
-                    
-                    area_m2 = area * (pixel_to_meter ** 2)
-                    building_type = classify_building_by_area(area_m2)
-                    population = estimate_population_for_building(building_type, area_m2)
-                    
-                    buildings.append({
-                        'id': i, 'type': building_type, 'area_m2': round(area_m2, 1),
-                        'population': population, 'bbox': (int(x_min), int(y_min), int(w), int(h)),
-                        'confidence': confidence
-                    })
-            except ImportError:
-                # Fallback
-                area = np.sum(binary_mask)
-                if area > 100:
-                    area_m2 = area * (pixel_to_meter ** 2)
-                    building_type = classify_building_by_area(area_m2)
-                    population = estimate_population_for_building(building_type, area_m2)
-                    buildings.append({
-                        'id': 1, 'type': building_type, 'area_m2': round(area_m2, 1),
-                        'population': population, 'bbox': (50, 50, 100, 100), 'confidence': confidence
-                    })
-                    
-        except Exception as e:
-            st.error(f"AI elemzesi hiba: {e}")
-            return analyze_image_complete(image, "demo", pixel_to_meter)
+        axes[1,1].text(0.5, 0.5, 'Nincs épület', ha='center', va='center', transform=axes[1,1].transAxes)
+        axes[1,1].set_title('Épülettípusok eloszlása')
     
-    # Összesítések
-    total_population = sum(b['population'] for b in buildings)
-    total_area_m2 = sum(b['area_m2'] for b in buildings)
-    annotated_image = create_annotated_image(image, buildings)
+    plt.tight_layout()
     
-    return {
-        'main_building_type': main_building_type, 'confidence': confidence,
-        'building_count': len(buildings), 'individual_buildings': buildings,
-        'total_population': round(total_population, 1), 'total_area_m2': round(total_area_m2, 1),
-        'annotated_image': annotated_image, 'inference_time': time.time() - start_time,
-        'model_used': model_used
-    }
+    # Kép konvertálása Streamlit számára
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    return buf
 
-# STREAMLIT ALKALMAZÁS
+# ===============================
+# STREAMLIT FELÜLET
+# ===============================
+
 def main():
-    st.title("🏠 Epulet Lakossagi Becslo")
-    st.markdown("TensorFlow 2.19 kompatibilis verzio")
+    # Fejléc
+    st.title("🏠 Épület Analizátor - Lakossági Becslés")
+    st.markdown("""
+    Ez az alkalmazás automatikusan detektálja az épületeket műholdképeken és becsüli a lakosság számát 
+    épülettípusonként a KSH adatok alapján.
+    """)
     
-    # Modell betöltés
-    model = load_model_advanced()
+    # Oldalsáv
+    st.sidebar.title("⚙️ Beállítások")
     
-    # Modell feltöltés lehetősége
-    uploaded_model = handle_model_upload()
-    if uploaded_model is not None:
-        model = uploaded_model
+    # Pixel-méter átváltás
+    pixel_to_meter = st.sidebar.slider(
+        "Pixel-méter átváltás",
+        min_value=0.1,
+        max_value=2.0,
+        value=0.5,
+        step=0.1,
+        help="Egy pixel hány métert reprezentál a valóságban"
+    )
     
-    # Beállítások
-    st.sidebar.header("⚙️ Beallitasok")
-    pixel_to_meter = st.sidebar.slider("Pixel/meter arany", 0.1, 2.0, 0.5)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Épülettípus információk")
     
-    # Modell információ
-    if model == "demo":
-        st.sidebar.warning("🔸 Demo Mod Aktiv")
-        st.sidebar.info("""
-        **TensorFlow 2.19 modell kompatibilitasi problema.**
+    for building_type, population in BUILDING_TYPE_POPULATION.items():
+        color = BUILDING_COLORS.get(building_type, [255, 255, 255])
+        color_hex = '#{:02x}{:02x}{:02x}'.format(color[0], color[1], color[2])
         
-        **Megoldasok:**
-        1. Modell ujramentese TF 2.13-ra
-        2. Modell feltoltese kompatibilis verzioval
-        3. Hasznald a demo modot
-        """)
-    else:
-        st.sidebar.success("✅ AI Modell Aktiv!")
+        if population > 0:
+            st.sidebar.markdown(
+                f"<span style='color:{color_hex}; font-weight:bold'>{building_type}</span>: "
+                f"{population} fő/alapérték", 
+                unsafe_allow_html=True
+            )
+        else:
+            st.sidebar.markdown(
+                f"<span style='color:{color_hex}; font-weight:bold'>{building_type}</span>: "
+                f"nem lakóépület", 
+                unsafe_allow_html=True
+            )
     
-    # Kép feltöltés
-    uploaded_file = st.file_uploader("📤 Tolts fel egy kepet", type=['jpg', 'jpeg', 'png'])
+    # Fő tartalom
+    col1, col2 = st.columns([1, 1])
     
-    if uploaded_file is not None:
-        col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📤 Kép feltöltése")
+        uploaded_file = st.file_uploader(
+            "Tölts fel egy műholdképet",
+            type=['jpg', 'jpeg', 'png'],
+            help="A kép tartalmazhat épületeket, preferáltan városi környezetben"
+        )
         
-        with col1:
-            st.subheader("Feltoltott kep")
+        if uploaded_file is not None:
+            # Kép megjelenítése
             image = Image.open(uploaded_file)
-            st.image(image, use_column_width=True)
-            st.write(f"Meret: {image.size[0]} x {image.size[1]} pixel")
-        
-        if st.button("🚀 Elemzes inditasa", type="primary"):
-            with st.spinner("Elemzes folyamatban..."):
-                results = analyze_image_complete(image, model, pixel_to_meter)
-                
-                with col2:
-                    st.subheader("Eredmeny")
-                    st.image(results['annotated_image'], use_column_width=True)
-                
-                if results['model_used']:
-                    st.success(f"✅ AI Elemzes kesz! ({results['inference_time']:.2f}s)")
-                else:
-                    st.info(f"🔸 Okos elemzes kesz! ({results['inference_time']:.2f}s)")
-                
-                # Metrikák
-                col3, col4, col5 = st.columns(3)
-                with col3: st.metric("Epuletek", f"{results['building_count']} db")
-                with col4: st.metric("Lakossag", f"{results['total_population']} fo")
-                with col5: st.metric("Terulet", f"{results['total_area_m2']} m2")
-                
-                # Részletes információk
-                with st.expander("📊 Reszletes statisztikak"):
-                    building_stats = {}
-                    for building in results['individual_buildings']:
-                        b_type = building['type']
-                        if b_type not in building_stats:
-                            building_stats[b_type] = {'count': 0, 'total_population': 0}
-                        building_stats[b_type]['count'] += 1
-                        building_stats[b_type]['total_population'] += building['population']
+            st.image(image, caption="Feltöltött kép", use_column_width=True)
+            
+            # Elemzés gomb
+            if st.button("🎯 Kép elemzése", type="primary", use_container_width=True):
+                with st.spinner("Modell betöltése és kép elemzése..."):
+                    # Modell betöltése
+                    model = load_model()
                     
-                    for b_type, stats in building_stats.items():
-                        color = BUILDING_COLORS[b_type]
-                        st.markdown(f"<span style='color:{color}'>■</span> **{BUILDING_LABELS[b_type]}**: {stats['count']} db, {stats['total_population']} fo", unsafe_allow_html=True)
+                    if model is None:
+                        st.error("A modell nem tölthető be. Ellenőrizze, hogy a 'final_multi_task_model.h5' fájl elérhető-e.")
+                        return
+                    
+                    # Kép elemzése
+                    result = analyze_image_with_model(model, image, pixel_to_meter)
+                    
+                    if result['success']:
+                        # Eredmények megjelenítése
+                        with col2:
+                            st.subheader("📊 Elemzés eredménye")
+                            
+                            # Statisztikák
+                            st.metric("Összes épület", result['building_count'])
+                            st.metric("Becsült lakosság", f"{result['total_population']:.0f} fő")
+                            st.metric("Feldolgozási idő", f"{result['inference_time']:.2f} másodperc")
+                            
+                            # Részletes statisztikák
+                            st.subheader("📈 Részletes statisztikák")
+                            
+                            # Épülettípus statisztikák
+                            type_stats = {}
+                            for building in result['individual_buildings']:
+                                b_type = building['type']
+                                if b_type not in type_stats:
+                                    type_stats[b_type] = {'count': 0, 'total_area': 0, 'total_population': 0}
+                                
+                                type_stats[b_type]['count'] += 1
+                                type_stats[b_type]['total_area'] += building['area_m2']
+                                type_stats[b_type]['total_population'] += building['population']
+                            
+                            for b_type, stats in type_stats.items():
+                                color = BUILDING_COLORS.get(b_type, [255, 255, 255])
+                                color_hex = '#{:02x}{:02x}{:02x}'.format(color[0], color[1], color[2])
+                                
+                                st.markdown(f"**<span style='color:{color_hex}'>{b_type}</span>**", unsafe_allow_html=True)
+                                col_a, col_b, col_c = st.columns(3)
+                                with col_a:
+                                    st.metric("Darabszám", stats['count'])
+                                with col_b:
+                                    st.metric("Terület", f"{stats['total_area']:.0f} m²")
+                                with col_c:
+                                    st.metric("Lakosság", f"{stats['total_population']:.0f} fő")
+                            
+                            # Vizuális eredmények
+                            st.subheader("🖼️ Vizuális elemzés")
+                            visualization = create_visualization(result)
+                            st.image(visualization, caption="Részletes elemzés eredménye", use_column_width=True)
+                            
+                            # Eredmények letöltése
+                            st.subheader("💾 Eredmények exportálása")
+                            
+                            # CSV export
+                            import pandas as pd
+                            df = pd.DataFrame(result['individual_buildings'])
+                            csv = df.to_csv(index=False)
+                            
+                            st.download_button(
+                                label="📥 Eredmények letöltése (CSV)",
+                                data=csv,
+                                file_name="epulet_elemzes.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                            
+                            # Kép export
+                            st.download_button(
+                                label="📥 Vizuális elemzés letöltése (PNG)",
+                                data=visualization,
+                                file_name="epulet_elemzes.png",
+                                mime="image/png",
+                                use_container_width=True
+                            )
+                    
+                    else:
+                        st.error(f"Elemzési hiba: {result['error']}")
     
-    else:
-        st.info("""
-        ### 🎯 TensorFlow 2.19 Kompatibilitasi Utmutato
-        
-        **1. Modell konvertalasa (ajanlott):**
-        ```python
-        # Futtasd a sajat gepeden TF 2.19-el
-        import tensorflow as tf
-        model = tf.keras.models.load_model('final_multi_task_model.h5')
-        model.save('final_multi_task_model_compatible.h5', save_format='h5')
-        ```
-        
-        **2. Kompatibilis modell feltoltese:**
-        - Hasznald a bal oldali modell feltolto gombot
-        - .h5 formatumu fajt tölts fel
-        
-        **3. requirements.txt:**
-        ```txt
-        streamlit==1.28.0
-        tensorflow==2.13.0
-        numpy==1.24.3
-        Pillow==10.0.1
-        scipy==1.11.4
-        ```
-        """)
+    # Információk, ha nincs feltöltött kép
+    if uploaded_file is None:
+        with col2:
+            st.info("👆 Kérjük, töltsön fel egy képet az elemzéshez")
+            
+            st.subheader("ℹ️ Használati útmutató")
+            st.markdown("""
+            1. **Kép feltöltése**: A bal oldali panelen töltsön fel egy műholdképet
+            2. **Beállítások**: Állítsa be a pixel-méter átváltási arányt
+            3. **Elemzés**: Kattintson a 'Kép elemzése' gombra
+            4. **Eredmények**: Nézze meg a jobb oldali panelen az eredményeket
+            
+            **Ajánlott képtípusok:**
+            - Műholdképek városi területekről
+            - JPG vagy PNG formátum
+            - Minimum felbontás: 256x256 pixel
+            - Világos, kontrasztos képek
+            """)
+            
+            st.subheader("🎯 Épülettípusok")
+            for building_type, color in BUILDING_COLORS.items():
+                color_hex = '#{:02x}{:02x}{:02x}'.format(color[0], color[1], color[2])
+                st.markdown(
+                    f"<span style='color:{color_hex}; font-weight:bold'>■</span> {building_type}",
+                    unsafe_allow_html=True
+                )
 
+# Alkalmazás indítása
 if __name__ == "__main__":
     main()
