@@ -96,7 +96,7 @@ def preprocess_image(image):
 
 def segment_buildings(mask, min_size=50):
     """Épületek szegmentálása"""
-    binary_mask = (mask > 0.5).astype(np.uint8)
+    binary_mask = (mask > 0.45).astype(np.uint8)
     
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
     
