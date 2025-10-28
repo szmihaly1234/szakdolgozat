@@ -1,7 +1,3 @@
-# ===============================
-# STREAMLIT ÉPÜLET ANALIZÁTOR - SPACENET OPTIMALIZÁLT
-# ===============================
-
 import streamlit as st
 import tensorflow as tf
 from tensorflow.keras import backend as K
@@ -13,9 +9,8 @@ import time
 import os
 import pandas as pd
 
-# Streamlit konfiguráció
 st.set_page_config(
-    page_title="Épület Analizátor",
+    page_title="Lakosság számláló",
     page_icon="🏠",
     layout="wide"
 )
@@ -151,7 +146,7 @@ def adjust_image_quality(image, target_brightness=0.6, target_contrast=0.7):
     return Image.fromarray(img_adjusted)
 
 # ===============================
-# KÉP FELDOLGOZÓ FUNKCIÓK
+# KÉPFELDOLGOZÓ FUNKCIÓK
 # ===============================
 
 def segment_buildings(mask, min_size=50):
@@ -182,11 +177,11 @@ def segment_buildings(mask, min_size=50):
 
 def estimate_building_type(area_m2):
     """Épülettípus becslése"""
-    if area_m2 < 150:
+    if area_m2 < 250:
         return 'kis_lakohaz'
-    elif area_m2 < 500:
+    elif area_m2 < 1000:
         return 'kozepes_lakohaz'
-    elif area_m2 < 2000:
+    elif area_m2 < 2500:
         return 'nagy_lakohaz'
     else:
         return 'tarsashaz'
