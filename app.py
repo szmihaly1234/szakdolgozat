@@ -39,8 +39,8 @@ BUILDING_COLORS = {
 
 # SpaceNet adatok jellemzői
 SPACENET_STATS = {
-    'mean': [0.339, 0.324, 0.285],  # SpaceNet RGB csatorna átlagok
-    'std': [0.139, 0.125, 0.122]    # SpaceNet RGB csatorna szórások
+    'mean': [0.339, 0.324, 0.285],
+    'std': [0.139, 0.125, 0.122]
 }
 
 # ===============================
@@ -51,7 +51,6 @@ SPACENET_STATS = {
 def load_model():
     """Modell betöltése"""
     try:
-        # Custom függvények a modellhez
         def dice_coef(y_true, y_pred):
             smooth = 1.0
             y_true_f = K.flatten(y_true)
@@ -62,7 +61,6 @@ def load_model():
         def dice_loss(y_true, y_pred):
             return 1 - dice_coef(y_true, y_pred)
 
-        # Modell betöltése
         model = tf.keras.models.load_model(
             'final_multi_task_model.h5',
             custom_objects={
@@ -77,83 +75,54 @@ def load_model():
         return None
 
 # ===============================
-# SPACENET KOMPATIBILIS KÉPFELDOLGOZÁS
+# JAVÍTOTT KÉPFELDOLGOZÁS
 # ===============================
 
 def spacenet_preprocessing(image):
     """SpaceNet adatokhoz igazított kép előfeldolgozás"""
-    # Konvertálás numpy array-ré
     if isinstance(image, Image.Image):
         img_array = np.array(image)
     else:
         img_array = image
     
-    # Színcsatornák kezelése
     if len(img_array.shape) == 2:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
     elif img_array.shape[2] == 4:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-    
-    # 1. Kontraszt és élesség javítása (SpaceNet képek jellemzői)
-    pil_img = Image.fromarray(img_array)
-    
-    # Kontraszt növelése
-    enhancer = ImageEnhance.Contrast(pil_img)
-    pil_img = enhancer.enhance(1.2)
-    
-    # Élesség növelése
-    enhancer = ImageEnhance.Sharpness(pil_img)
-    pil_img = enhancer.enhance(1.1)
-    
-    img_array = np.array(pil_img)
-    
-    # 2. Hisztogram egyenlítés - jobb kontraszt
-    img_yuv = cv2.cvtColor(img_array, cv2.COLOR_RGB2YUV)
-    img_yuv[:,:,0] = cv2.equalizeHist(img_yuv[:,:,0])
-    img_array = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2RGB)
     
     return img_array
 
 def normalize_for_spacenet(img_array):
     """SpaceNet statisztikák alapján normalizálás"""
     img_float = img_array.astype(np.float32) / 255.0
-    
-    # SpaceNet átlag és szórás alapján normalizálás
     mean = np.array(SPACENET_STATS['mean'])
     std = np.array(SPACENET_STATS['std'])
-    
     img_normalized = (img_float - mean) / std
     return img_normalized
 
 def adjust_image_quality(image, target_brightness=0.6, target_contrast=0.7):
-    """Kép minőségének beállítása SpaceNet színjellemzőkhez"""
+    """Kép minőségének beállítása"""
     img_array = np.array(image)
-    
-    # Átlagos fényerő és kontraszt számítás
     current_brightness = np.mean(img_array) / 255.0
     current_contrast = np.std(img_array) / 255.0
     
-    # Fényerő korrekció
     brightness_ratio = target_brightness / (current_brightness + 1e-7)
     img_adjusted = np.clip(img_array * brightness_ratio, 0, 255).astype(np.uint8)
     
-    # Kontraszt korrekció
     if current_contrast < target_contrast:
-        # Kontraszt növelése
         alpha = 1.0 + (target_contrast - current_contrast) * 1.5
         img_adjusted = cv2.convertScaleAbs(img_adjusted, alpha=alpha, beta=0)
     
     return Image.fromarray(img_adjusted)
 
 # ===============================
-# KÉPFELDOLGOZÓ FUNKCIÓK
+# JAVÍTOTT KÉPFELDOLGOZÓ FUNKCIÓK
 # ===============================
 
 def segment_buildings(mask, min_size=50):
-    """Épületek szegmentálása"""
+    """Épületek szegmentálása - JAVÍTOTT"""
     binary_mask = (mask > 0.5).astype(np.uint8)
     
-    # Morfológiai műveletek - zaj csökkentése
     kernel = np.ones((3,3), np.uint8)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
@@ -170,7 +139,8 @@ def segment_buildings(mask, min_size=50):
         
         buildings.append({
             'area': area,
-            'bbox': (x, y, w, h)
+            'bbox': (x, y, w, h),
+            'centroid': centroids[i]
         })
     
     return buildings
@@ -204,8 +174,19 @@ def estimate_population(building_type, area):
         
     return round(population, 1)
 
-def create_segmentation_visualization(original_img, seg_mask):
-    """Szegmentációs maszk vizualizálása"""
+def create_precise_segmentation_visualization(original_img, seg_mask):
+    """PONTOS szegmentációs maszk vizualizálása"""
+    # Ellenőrizzük a méreteket
+    orig_h, orig_w = original_img.shape[:2]
+    mask_h, mask_w = seg_mask.shape[:2]
+    
+    st.write(f"🔍 Méret ellenőrzés: Kép={orig_w}x{orig_h}, Maszk={mask_w}x{mask_h}")
+    
+    # Ha a maszk nem stimmel a képpel, átméretezzük
+    if (orig_w != mask_w) or (orig_h != mask_h):
+        st.warning(f"⚠️ Maszk méret korrekció: {mask_w}x{mask_h} -> {orig_w}x{orig_h}")
+        seg_mask = cv2.resize(seg_mask, (orig_w, orig_h))
+    
     # Szegmentációs maszk színezése
     seg_colored = np.zeros_like(original_img)
     seg_colored[seg_mask > 0.5] = [255, 0, 0]  # Piros szín az épületeknek
@@ -213,7 +194,8 @@ def create_segmentation_visualization(original_img, seg_mask):
     # Átlátszó overlay
     alpha = 0.6
     result = cv2.addWeighted(original_img, 1 - alpha, seg_colored, alpha, 0)
-    return result
+    
+    return result, seg_mask  # Visszaadjuk a korrigált maszkot is
 
 def create_building_visualization(original_img, building_analysis):
     """Épületek vizualizálása bounding box-okkal"""
@@ -238,22 +220,28 @@ def create_building_visualization(original_img, building_analysis):
     
     return result_img
 
-def analyze_image(model, image, pixel_to_meter=0.5, enhance_quality=True):
-    """Kép elemzése SpaceNet kompatibilis módon"""
+def analyze_image_improved(model, image, pixel_to_meter=0.5, enhance_quality=True):
+    """JAVÍTOTT kép elemzés pontos maszk kezeléssel"""
     try:
         # Kép előkészítése
         if enhance_quality:
             image = adjust_image_quality(image)
         
         original_img = spacenet_preprocessing(image)
-        original_shape = original_img.shape[:2]
+        original_shape = original_img.shape[:2]  # (height, width)
+        orig_h, orig_w = original_shape
         
+        st.write(f"📐 Eredeti kép mérete: {orig_w}x{orig_h}")
+
         # Progress indicator
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         status_text.text("Kép előkészítése...")
-        img_resized = cv2.resize(original_img, (256, 256))
+        
+        # Modell bemeneti méretének megfelelő átméretezés
+        model_input_size = (256, 256)  # A modell várt bemeneti mérete
+        img_resized = cv2.resize(original_img, model_input_size)
         
         # SpaceNet normalizálás
         img_input = normalize_for_spacenet(img_resized)
@@ -267,9 +255,14 @@ def analyze_image(model, image, pixel_to_meter=0.5, enhance_quality=True):
         progress_bar.progress(50)
         
         status_text.text("Eredmények feldolgozása...")
-        seg_mask = cv2.resize(seg_pred[0,:,:,0], (original_shape[1], original_shape[0]))
         
-        buildings = segment_buildings(seg_mask)
+        # MASZK ATMÉRETEZÉS - EZ A KULCS LÉPÉS!
+        # A modell 256x256-os kimenetét visszaméretezzük az eredeti képméretre
+        seg_mask_original_size = cv2.resize(seg_pred[0,:,:,0], (orig_w, orig_h))
+        
+        st.write(f"🎯 Maszk mérete korrekció után: {seg_mask_original_size.shape[1]}x{seg_mask_original_size.shape[0]}")
+        
+        buildings = segment_buildings(seg_mask_original_size)
         progress_bar.progress(75)
         
         # Elemzés
@@ -301,11 +294,13 @@ def analyze_image(model, image, pixel_to_meter=0.5, enhance_quality=True):
         return {
             'success': True,
             'original_image': original_img,
-            'segmentation_mask': seg_mask,
+            'segmentation_mask': seg_mask_original_size,  # Már korrigált méret
             'individual_buildings': building_analysis,
             'total_population': total_population,
             'inference_time': inference_time,
-            'building_count': len(building_analysis)
+            'building_count': len(building_analysis),
+            'original_size': (orig_w, orig_h),
+            'mask_size': seg_mask_original_size.shape[::-1]  # (width, height)
         }
         
     except Exception as e:
@@ -315,37 +310,33 @@ def analyze_image(model, image, pixel_to_meter=0.5, enhance_quality=True):
         }
 
 # ===============================
-# FŐ ALKALMAZÁS
+# FŐ ALKALMAZÁS - JAVÍTOTT
 # ===============================
 
 def main():
-    st.title("🏠 Épület Analizátor - SpaceNet Optimalizált")
-    st.markdown("Automatikus épület detekció SpaceNet modelllel")
+    st.title("🏠 Épület Analizátor - Javított Maszk Kezeléssel")
+    st.markdown("Automatikus épület detekció pontos maszk kezeléssel")
     
     # Oldalsáv
     with st.sidebar:
-        st.header("⚙️ SpaceNet Beállítások")
+        st.header("⚙️ Elemzési Beállítások")
         
         pixel_to_meter = st.slider(
             "Pixel-méter átváltás",
             0.1, 2.0, 0.5, 0.1,
-            help="Egy pixel hány métert reprezentál (SpaceNet: 0.3-0.5)"
+            help="Egy pixel hány métert reprezentál"
         )
         
         enhance_quality = st.checkbox(
             "Képminőség javítása", 
-            value=True,
-            help="Automatikus kontraszt és fényerő korrekció SpaceNet-hez"
+            value=True
         )
         
-        st.markdown("---")
-        st.subheader("🎯 SpaceNet Tippek")
-        st.markdown("""
-        - **Ideális képek**: műholdfelvételek, légi felvételek
-        - **Felbontás**: 0.3-1.0 m/pixel
-        - **Színek**: természetes RGB
-        - **Fényviszonyok**: nappali, felhőtlen
-        """)
+        show_debug_info = st.checkbox(
+            "Hibakeresési információk",
+            value=False,
+            help="Méret ellenőrzések megjelenítése"
+        )
         
         st.markdown("---")
         st.subheader("🏗️ Épülettípusok")
@@ -375,14 +366,11 @@ def main():
         
         uploaded_file = st.file_uploader(
             "Válassz egy képet...",
-            type=['jpg', 'jpeg', 'png'],
-            help="SpaceNet kompatibilis képek: műhold, légi felvételek"
+            type=['jpg', 'jpeg', 'png']
         )
         
         if uploaded_file is not None:
             image = Image.open(uploaded_file)
-            
-            # Kép információk
             st.image(image, caption=f"Feltöltött kép - {image.size[0]}x{image.size[1]}", use_column_width=True)
             
             if st.button("🎯 Kép elemzése", type="primary", use_container_width=True):
@@ -392,11 +380,20 @@ def main():
                     st.error("A modell nem tölthető be. Ellenőrizd a final_multi_task_model.h5 fájlt.")
                     return
                 
-                result = analyze_image(model, image, pixel_to_meter, enhance_quality)
+                result = analyze_image_improved(model, image, pixel_to_meter, enhance_quality)
                 
                 if result['success']:
                     with col2:
-                        st.subheader("📊 SpaceNet Elemzés Eredmények")
+                        st.subheader("📊 Elemzés Eredmények")
+                        
+                        # Hibakeresési információk
+                        if show_debug_info:
+                            st.info(f"""
+                            **🔍 Hibakeresési információk:**
+                            - Eredeti kép: {result['original_size'][0]}x{result['original_size'][1]}
+                            - Maszk méret: {result['mask_size'][0]}x{result['mask_size'][1]}
+                            - Méret egyezés: {"✅" if result['original_size'] == result['mask_size'] else "❌"}
+                            """)
                         
                         # Fő metrikák
                         col1, col2, col3 = st.columns(3)
@@ -427,13 +424,10 @@ def main():
                             st.warning("Nem találhatók épületek. Próbáld meg a képminőség javítását!")
                         
                         # Vizuális eredmények
-                        st.subheader("🖼️ SpaceNet Elemzés")
+                        st.subheader("🖼️ Elemzési Eredmények")
                         
-                        # Eredeti kép
-                        st.image(result['original_image'], caption="Előfeldolgozott kép", use_column_width=True)
-                        
-                        # Szegmentációs maszk
-                        seg_visual = create_segmentation_visualization(
+                        # Pontos szegmentációs maszk
+                        seg_visual, corrected_mask = create_precise_segmentation_visualization(
                             result['original_image'], 
                             result['segmentation_mask']
                         )
@@ -455,26 +449,11 @@ def main():
                             df = pd.DataFrame(result['individual_buildings'])
                             csv = df.to_csv(index=False)
                             
-                            # CSV letöltés
                             st.download_button(
                                 "📥 CSV letöltése",
                                 csv,
-                                "spacenet_elemzes.csv",
+                                "epulet_elemzes.csv",
                                 "text/csv",
-                                use_container_width=True
-                            )
-                            
-                            # Kép letöltése
-                            building_visual_pil = Image.fromarray(cv2.cvtColor(building_visual, cv2.COLOR_BGR2RGB))
-                            img_buffer = io.BytesIO()
-                            building_visual_pil.save(img_buffer, format='PNG')
-                            img_buffer.seek(0)
-                            
-                            st.download_button(
-                                "📥 Elemzés kép letöltése",
-                                img_buffer.getvalue(),
-                                "spacenet_elemzes.png",
-                                "image/png",
                                 use_container_width=True
                             )
                 else:
@@ -482,29 +461,22 @@ def main():
     
     if uploaded_file is None:
         with col2:
-            st.info("👆 Tölts fel egy SpaceNet kompatibilis képet")
+            st.info("👆 Tölts fel egy képet az elemzéshez")
             
-            st.subheader("ℹ️ SpaceNet Optimalizált Használat")
+            st.subheader("🔧 Javítások a maszk kezelésben")
             st.markdown("""
-            ### 🎯 SpaceNet Modell Optimalizáció
+            ### 🎯 **Probléma és Megoldás**
             
-            **Képfeldolgozás javítások:**
-            - ✅ **Automatikus kontraszt korrekció**
-            - ✅ **Fényerő beállítás SpaceNet színjellemzőkhez**
-            - ✅ **Hisztogram egyenlítés jobb kontrasztért**
-            - ✅ **Normalizálás SpaceNet statisztikák alapján**
+            **Probléma:**
+            - Maszk elcsúszik az eredeti képen
+            - Bounding box-ok nem illeszkednek az épületekre
+            - Méreteltolódás a szegmentálásnál
             
-            **Ajánlott beállítások:**
-            - **Pixel-méter**: 0.3-0.7 (SpaceNet tipikus érték)
-            - **Képminőség javítás**: Bekapcsolva
-            - **Képtípus**: Műhold, légi felvételek
-            - **Felbontás**: Minimum 256x256 pixel
-            
-            **SpaceNet jellemzők:**
-            - Műhold képek 30-50 cm felbontással
-            - RGB színes felvételek
-            - Városi és külterületi környezet
-            - Különböző fényviszonyok
+            **Megoldások:**
+            1. **Pontos méret követés**: Mindig ellenőrizzük a kép és maszk méretét
+            2. **Helyes átméretezés**: `cv2.resize(seg_mask, (orig_w, orig_h))`
+            3. **Koordináta korrekció**: A bounding box-ok a korrigált maszkból származnak
+            4. **Hibakeresés**: Méret információk megjelenítése
             """)
 
 if __name__ == "__main__":
