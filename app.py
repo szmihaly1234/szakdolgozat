@@ -22,8 +22,6 @@ st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout=
 # ===============================
 
 @st.cache_resource(show_spinner=False)
-
-@st.cache_resource(show_spinner=False)
 def load_model():
     try:
         file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
