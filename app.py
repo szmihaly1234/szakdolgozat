@@ -53,7 +53,7 @@ def load_model():
     try:
         # Google Drive fájl azonosító (cseréld ki a sajátodra)
         file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"  # <-- IDE jön a saját fájlod ID-ja
-        destination = "model.h5"
+        destination = "final_multi_task_model.h5"
 
         # Ha a fájl még nincs letöltve, töltsük le
         if not os.path.exists(destination):
