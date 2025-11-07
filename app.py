@@ -8,6 +8,8 @@ import requests
 import os
 import time
 import pandas as pd
+import gdown
+
 
 st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
 
@@ -16,7 +18,6 @@ st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout=
 # ===============================
 
 @st.cache_resource(show_spinner=False)
-import gdown
 
 @st.cache_resource(show_spinner=False)
 def load_model():
