@@ -12,7 +12,7 @@ import gdown
 
 file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
 url = f"https://drive.google.com/uc?id={file_id}"
-gdown.download(url, "model.h5", quiet=False
+gdown.download(url, "model.h5", quiet=False)
 
 
 st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
