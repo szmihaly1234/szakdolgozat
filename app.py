@@ -16,31 +16,39 @@ st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout=
 # ===============================
 
 @st.cache_resource(show_spinner=False)
+import gdown
+
+@st.cache_resource(show_spinner=False)
 def load_model():
-    file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
-    destination = "model.h5"
+    try:
+        file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
+        destination = "model.h5"
+        url = f"https://drive.google.com/uc?id={file_id}"
 
-    if not os.path.exists(destination):
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        r = requests.get(url)
-        if r.status_code == 200:
-            with open(destination, "wb") as f:
-                f.write(r.content)
-        else:
-            st.error("❌ Modell letöltése sikertelen.")
-            return None
+        if not os.path.exists(destination):
+            gdown.download(url, destination, quiet=False)
 
-    def dice_coef(y_true, y_pred):
-        smooth = 1.0
-        y_true_f = K.flatten(y_true)
-        y_pred_f = K.flatten(y_pred)
-        intersection = K.sum(y_true_f * y_pred_f)
-        return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+        def dice_coef(y_true, y_pred):
+            smooth = 1.0
+            y_true_f = K.flatten(y_true)
+            y_pred_f = K.flatten(y_pred)
+            intersection = K.sum(y_true_f * y_pred_f)
+            return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
-    def dice_loss(y_true, y_pred):
-        return 1 - dice_coef(y_true, y_pred)
+        def dice_loss(y_true, y_pred):
+            return 1 - dice_coef(y_true, y_pred)
 
-    return tf.keras.models.load_model(destination, custom_objects={'dice_loss': dice_loss, 'dice_coef': dice_coef}, compile=False)
+        model = tf.keras.models.load_model(
+            destination,
+            custom_objects={'dice_loss': dice_loss, 'dice_coef': dice_coef},
+            compile=False
+        )
+        return model
+
+    except Exception as e:
+        st.error(f"Modell betöltési hiba: {e}")
+        return None
+
 
 # ===============================
 # KÉPFELDOLGOZÁS
