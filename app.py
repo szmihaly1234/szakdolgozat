@@ -1,5 +1,4 @@
 import os
-import time
 import numpy as np
 import pandas as pd
 import cv2
@@ -14,11 +13,8 @@ from PIL import Image
 # ===============================
 
 st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
-
-# Fix CUDA/TF log zaj
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
-# Google Drive modell letöltés
 FILE_ID = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
 MODEL_PATH = "model.h5"
 URL = f"https://drive.google.com/uc?id={FILE_ID}"
@@ -69,10 +65,7 @@ def segment_buildings(mask: np.ndarray, min_size: int = 50):
         area = stats[i, cv2.CC_STAT_AREA]
         if area < min_size:
             continue
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
+        x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         buildings.append({'area': area, 'bbox': (x, y, w, h), 'centroid': centroids[i]})
     return buildings
 
@@ -102,7 +95,6 @@ def estimate_population(btype: str, area: float) -> float:
 @st.cache_resource(show_spinner=False)
 def load_model():
     try:
-        # DepthwiseConv2D patch: elnyeli a 'groups' argumentumot
         from tensorflow.keras.layers import DepthwiseConv2D
 
         class PatchedDepthwiseConv2D(DepthwiseConv2D):
@@ -134,34 +126,20 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, debug: bool = False
     orig = np.array(image.convert("RGB"))
     h, w = orig.shape[:2]
 
-    # Model input shape detektálása
-    input_shape = model.input_shape  # pl. (None, 256, 256, 3) vagy (None, 3, 256, 256)
+    # Input shape
+    input_shape = model.input_shape
     if isinstance(input_shape, list):
-        # több bemenet esetén az elsőt használjuk
         input_shape = input_shape[0]
 
-    # Meghatározzuk channels_last / channels_first és célméretet
+    # Heurisztika
     if len(input_shape) == 4:
-        b, d1, d2, d3 = input_shape
-        if d1 in (None,):
-            # Heurisztika: ha d1 None, valószínű (None, H, W, C)
-            target_h = d2 if d2 is not None else 256
-            target_w = d3 if d3 is not None else 256
+        if input_shape[-1] in (1, 3):
             channels_last = True
+            target_h, target_w = input_shape[1], input_shape[2]
         else:
-            # Ha d1 konkrét és kicsi (pl. 3), lehet (None, C, H, W)
-            if d1 in (1, 3):
-                channels_last = False
-                channels = d1
-                target_h = d2 if d2 is not None else 256
-                target_w = d3 if d3 is not None else 256
-            else:
-                # Gyakori: (None, 256, 256, 3)
-                channels_last = True
-                target_h = d1 if d1 is not None else 256
-                target_w = d2 if d2 is not None else 256
+            channels_last = False
+            target_h, target_w = input_shape[2], input_shape[3]
     else:
-        # fallback
         channels_last = True
         target_h, target_w = 256, 256
 
@@ -169,40 +147,33 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, debug: bool = False
     norm = normalize(resized)
 
     if channels_last:
-        input_img = norm[None, ...]  # (1, H, W, C)
+        input_img = norm[None, ...]
     else:
-        # (1, C, H, W)
         input_img = np.transpose(norm, (2, 0, 1))[None, ...]
 
     if debug:
         st.write("DEBUG model.input_shape:", model.input_shape)
         st.write("DEBUG input_img.shape:", input_img.shape)
 
-    # Predikció robusztus kezelése (egy vagy több output)
-pred = model.predict(input_img, verbose=0)
+    pred = model.predict(input_img, verbose=0)
+    if isinstance(pred, (list, tuple)):
+        pred0 = pred[0]
+    else:
+        pred0 = pred
 
-# Ha lista vagy tuple, az első outputot vesszük
-if isinstance(pred, (list, tuple)):
-    pred0 = pred[0]
-else:
-    pred0 = pred
+    if debug:
+        st.write("DEBUG type(pred):", type(pred))
+        st.write("DEBUG pred0.shape:", getattr(pred0, "shape", None))
 
-# Debug
-if debug:
-    st.write("DEBUG type(pred):", type(pred))
-    st.write("DEBUG pred0.shape:", getattr(pred0, "shape", None))
+    # Maszk kiválasztás
+    if pred0.ndim == 4:
+        mask_small = pred0[0, :, :, 0]
+    elif pred0.ndim == 3:
+        mask_small = pred0[:, :, 0]
+    else:
+        raise ValueError(f"Nem támogatott predikciós forma: {pred0.shape}")
 
-# Maszk kiválasztás
-if pred0.ndim == 4:
-    mask_small = pred0[0, :, :, 0]
-elif pred0.ndim == 3:
-    mask_small = pred0[:, :, 0]
-else:
-    raise ValueError(f"Nem támogatott predikciós forma: {pred0.shape}")
-
-mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-
+    mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
     buildings = segment_buildings(mask)
 
     results = []
@@ -212,13 +183,7 @@ mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
         btype = estimate_type(area_m2)
         pop = estimate_population(btype, area_m2)
         total_pop += pop
-        results.append({
-            'id': i + 1,
-            'type': btype,
-            'area_m2': round(area_m2, 1),
-            'population': pop,
-            'bbox': b['bbox']
-        })
+        results.append({'id': i + 1, 'type': btype, 'area_m2': round(area_m2, 1), 'population': pop, 'bbox': b['bbox']})
 
     return orig, mask, results, total_pop
 
@@ -238,46 +203,4 @@ def main():
 
     if uploaded:
         image = Image.open(uploaded)
-        st.image(image, caption="Feltöltött kép", use_column_width=True)
-
-        if st.button("Elemzés indítása"):
-            model = load_model()
-            if model is None:
-                st.error("❌ Modell betöltése sikertelen.")
-                return
-
-            with st.spinner("Elemzés folyamatban..."):
-                try:
-                    orig, mask, buildings, total_pop = analyze(model, image, px_to_m, debug=debug)
-                except Exception as e:
-                    st.error(f"Hiba az elemzés során: {e}")
-                    if debug:
-                        st.exception(e)
-                    return
-
-            st.subheader("📊 Eredmények")
-            st.metric("Épületek száma", len(buildings))
-            st.metric("Lakosság becslés", f"{total_pop:.0f} fő")
-
-            st.subheader("🖼️ Szegmentáció")
-            overlay = orig.copy()
-            overlay[mask > 0.5] = [255, 0, 0]
-            result = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-            st.image(result, caption="Szegmentált kép", use_column_width=True)
-
-            st.subheader("📦 Épületek")
-            vis = orig.copy()
-            for b in buildings:
-                x, y, w, h = b['bbox']
-                cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                label = f"{b['type']} ({b['population']} fő)"
-                cv2.putText(vis, label, (x, max(0, y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            st.image(vis, caption="Detektált épületek", use_column_width=True)
-
-            st.subheader("💾 Export")
-            df = pd.DataFrame(buildings)
-            st.download_button("CSV letöltése", df.to_csv(index=False), "epulet_adatok.csv", "text/csv")
-
-
-if __name__ == "__main__":
-    main()
+        st.image(image, caption="Feltöltött kép",
