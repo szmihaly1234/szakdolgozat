@@ -14,7 +14,6 @@ file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
 url = f"https://drive.google.com/uc?id={file_id}"
 gdown.download(url, "model.h5", quiet=False)
 
-
 st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
 
 # ===============================
@@ -24,7 +23,6 @@ st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout=
 @st.cache_resource(show_spinner=False)
 def load_model():
     try:
-        file_id = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
         destination = "model.h5"
         url = f"https://drive.google.com/uc?id={file_id}"
 
@@ -41,9 +39,21 @@ def load_model():
         def dice_loss(y_true, y_pred):
             return 1 - dice_coef(y_true, y_pred)
 
+        # --- PATCH: DepthwiseConv2D wrapper ---
+        from tensorflow.keras.layers import DepthwiseConv2D
+
+        class PatchedDepthwiseConv2D(DepthwiseConv2D):
+            def __init__(self, *args, groups=None, **kwargs):
+                # groups paramétert figyelmen kívül hagyjuk
+                super().__init__(*args, **kwargs)
+
         model = tf.keras.models.load_model(
             destination,
-            custom_objects={'dice_loss': dice_loss, 'dice_coef': dice_coef},
+            custom_objects={
+                'dice_loss': dice_loss,
+                'dice_coef': dice_coef,
+                'DepthwiseConv2D': PatchedDepthwiseConv2D
+            },
             compile=False
         )
         return model
