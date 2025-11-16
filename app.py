@@ -16,7 +16,7 @@ import time
 st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
-FILE_ID = "1UctmGsjmzKBu74jLou7WaYZ9LoIe-DRt"
+FILE_ID = "19Mw_N1ilU58ipoQ6-BdSbPVtHAlSsn2u"
 MODEL_PATH = "model.h5"
 URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
