@@ -204,3 +204,6 @@ def main():
     if uploaded:
         image = Image.open(uploaded)
         st.image(image, caption="Feltöltött kép")
+
+if __name__ == "__main__":
+    main()
