@@ -135,8 +135,23 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
     orig = np.array(image.convert("RGB"))
     h, w = orig.shape[:2]
 
-    resized = cv2.resize(orig, (256, 256))
-    norm = normalize(resized)[None, ...]  # (1, H, W, C)
+    # Modell input shape alapján igazítás
+    input_shape = model.input_shape
+    if isinstance(input_shape, list):
+        input_shape = input_shape[0]
+
+    if input_shape[-1] == 3:  # channels_last
+        target_h, target_w = input_shape[1], input_shape[2]
+        resized = cv2.resize(orig, (target_w, target_h))
+        norm = normalize(resized)[None, ...]  # (1, H, W, C)
+    elif input_shape[1] == 3:  # channels_first
+        target_h, target_w = input_shape[2], input_shape[3]
+        resized = cv2.resize(orig, (target_w, target_h))
+        norm = np.transpose(normalize(resized), (2,0,1))[None, ...]  # (1, C, H, W)
+    else:
+        raise ValueError(f"Nem támogatott input shape: {input_shape}")
+
+    st.write("DEBUG input_img.shape:", norm.shape)
 
     pred = model.predict(norm, verbose=0)
     pred0 = pred[0] if isinstance(pred, (list, tuple)) else pred
