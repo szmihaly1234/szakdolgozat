@@ -100,11 +100,11 @@ BUILDING_TYPE_POPULATION = {
 }
 
 def estimate_building_type(area_m2: float) -> str:
-    if area_m2 < 250:
+    if area_m2 < 100:
         return 'kis_lakohaz'
-    elif area_m2 < 1000:
+    elif area_m2 < 300:
         return 'kozepes_lakohaz'
-    elif area_m2 < 2500:
+    elif area_m2 < 1000:
         return 'nagy_lakohaz'
     else:
         return 'tarsashaz'
