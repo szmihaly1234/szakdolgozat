@@ -203,4 +203,4 @@ def main():
 
     if uploaded:
         image = Image.open(uploaded)
-        st.image(image, caption="Feltöltött kép",
+        st.image(image, caption="Feltöltött kép", use_column_width=True)
