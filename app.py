@@ -179,38 +179,29 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, debug: bool = False
         st.write("DEBUG input_img.shape:", input_img.shape)
 
     # Predikció robusztus kezelése (egy vagy több output)
-    pred = model.predict(input_img, verbose=0)
-    if isinstance(pred, list) or isinstance(pred, tuple):
-        pred0 = pred[0]
-    else:
-        pred0 = pred
+pred = model.predict(input_img, verbose=0)
 
-    # pred0 shape értelmezése: lehet (1, H, W, 1) vagy (1, 1, H, W)
-    if pred0.ndim == 4:
-        # Batch dim az első
-        p = pred0[0]
-    else:
-        p = pred0
+# Ha lista vagy tuple, az első outputot vesszük
+if isinstance(pred, (list, tuple)):
+    pred0 = pred[0]
+else:
+    pred0 = pred
 
-    # Csatorna kiválasztás
-    if p.ndim == 3:
-        # (H, W, C) vagy (C, H, W)
-        if p.shape[-1] in (1, 2, 3, 4, 8):
-            # (H, W, C)
-            mask_small = p[..., 0]
-        elif p.shape[0] in (1, 2, 3, 4, 8):
-            # (C, H, W)
-            mask_small = p[0, ...]
-        else:
-            # Heurisztika: ha nem egyértelmű, vesszük az első tengely szerinti szeletet
-            mask_small = p[..., 0] if p.shape[-1] < p.shape[0] else p[0, ...]
-    elif p.ndim == 2:
-        mask_small = p
-    else:
-        raise ValueError(f"Nem támogatott predikciós forma: {p.shape}")
+# Debug
+if debug:
+    st.write("DEBUG type(pred):", type(pred))
+    st.write("DEBUG pred0.shape:", getattr(pred0, "shape", None))
 
-    # Visszaskálázás az eredeti kép méretére
-    mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+# Maszk kiválasztás
+if pred0.ndim == 4:
+    mask_small = pred0[0, :, :, 0]
+elif pred0.ndim == 3:
+    mask_small = pred0[:, :, 0]
+else:
+    raise ValueError(f"Nem támogatott predikciós forma: {pred0.shape}")
+
+mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+
 
     buildings = segment_buildings(mask)
 
