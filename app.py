@@ -7,6 +7,7 @@ import streamlit as st
 import tensorflow as tf
 from tensorflow.keras import backend as K
 from PIL import Image
+import time
 
 # ===============================
 # ALAP BEÁLLÍTÁSOK
@@ -22,6 +23,13 @@ URL = f"https://drive.google.com/uc?id={FILE_ID}"
 # Letöltés, ha hiányzik
 if not os.path.exists(MODEL_PATH):
     gdown.download(URL, MODEL_PATH, quiet=False)
+
+# ===============================
+# SpaceNet statok
+# ===============================
+
+SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
+SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 
 # ===============================
 # HELYI FÜGGVÉNYEK
@@ -47,12 +55,8 @@ def enhance_with_clahe(image: Image.Image) -> Image.Image:
     enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
     return Image.fromarray(enhanced)
 
-# SpaceNet-szerű előfeldolgozás
-SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
-SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
-
 def spacenet_preprocessing(image_or_array) -> np.ndarray:
-    """SpaceNet-szerű előfeldolgozás: RGB csatornák egységesítése + SpaceNet mean/std normalizálás."""
+    """SpaceNet-szerű előfeldolgozás: RGB csatornák egységesítése + mean/std normalizálás."""
     if isinstance(image_or_array, Image.Image):
         img = np.array(image_or_array)
     else:
@@ -67,8 +71,8 @@ def spacenet_preprocessing(image_or_array) -> np.ndarray:
     return (img_float - SPACENET_MEAN) / SPACENET_STD
 
 def segment_buildings(mask: np.ndarray, min_size: int = 50):
-    binary_mask = (mask > 0.4).astype(np.uint8)
-    kernel = np.ones((5, 5), np.uint8)
+    binary_mask = (mask > 0.5).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
@@ -78,12 +82,22 @@ def segment_buildings(mask: np.ndarray, min_size: int = 50):
         area = stats[i, cv2.CC_STAT_AREA]
         if area < min_size:
             continue
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
+        x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         buildings.append({'area': area, 'bbox': (x, y, w, h), 'centroid': centroids[i]})
     return buildings
+
+# ===============================
+# OSZTÁLYOZÓ + LAKOSSÁGSZÁM LOGIKA (feltöltött verzió alapján)
+# ===============================
+
+BUILDING_TYPE_POPULATION = {
+    'kis_lakohaz': 2.9,
+    'kozepes_lakohaz': 3.2,
+    'nagy_lakohaz': 4.1,
+    'tarsashaz': 45,
+    'kereskedelmi': 0,
+    'ipari': 0
+}
 
 def estimate_building_type(area_m2: float) -> str:
     if area_m2 < 250:
@@ -96,7 +110,9 @@ def estimate_building_type(area_m2: float) -> str:
         return 'tarsashaz'
 
 def estimate_population(building_type: str, area: float) -> float:
-    base_pop = {'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1, 'tarsashaz': 45}.get(building_type, 0)
+    if building_type not in BUILDING_TYPE_POPULATION:
+        return 0
+    base_pop = BUILDING_TYPE_POPULATION[building_type]
     if building_type in ['kis_lakohaz', 'kozepes_lakohaz', 'nagy_lakohaz']:
         apartments = max(1, area / 100)
         population = base_pop * apartments
@@ -104,7 +120,7 @@ def estimate_population(building_type: str, area: float) -> float:
         apartments = max(8, area / 80)
         population = base_pop * (apartments / 10)
     else:
-        population = 0
+        population = base_pop
     return round(population, 1)
 
 # ===============================
@@ -116,6 +132,7 @@ def load_model():
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
+        # Patch: elnyeli a 'groups' argumentumot deszerializáláskor
         class PatchedDepthwiseConv2D(DepthwiseConv2D):
             def __init__(self, *args, groups=None, **kwargs):
                 super().__init__(*args, **kwargs)
@@ -177,34 +194,33 @@ def make_input_tensor(model, orig_rgb: np.ndarray) -> tuple[np.ndarray, bool, tu
 # ===============================
 
 def analyze(model, image: Image.Image, px_to_m: float = 0.5):
+    # Előkészítés + SpaceNet pipeline
     image = enhance_with_clahe(image)
     orig = np.array(image.convert("RGB"))
     h, w = orig.shape[:2]
 
     input_tensor, channels_last, _ = make_input_tensor(model, orig)
 
+    # Inference
     pred = model.predict(input_tensor, verbose=0)
     pred0 = pred[0] if isinstance(pred, (list, tuple)) else pred
 
-    # Maszk kinyerése: támogatjuk (B,H,W,C) és (B,C,H,W) esetet
+    # Maszk kinyerése
     if pred0.ndim == 4:
         p = pred0[0]
-        if channels_last:
-            mask_small = p[..., 0]
-        else:
-            mask_small = p[0, ...]
+        mask_small = p[..., 0] if channels_last else p[0, ...]
     elif pred0.ndim == 3:
-        # ritkább eset, de kezeljük
-        if channels_last:
-            mask_small = pred0[..., 0]
-        else:
-            mask_small = pred0[0, ...]
+        mask_small = pred0[..., 0] if channels_last else pred0[0, ...]
     else:
         raise ValueError(f"Váratlan predikciós alak: {pred0.shape}")
 
+    # Maszk visszaméretezése
     mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    # Épületek
     buildings = segment_buildings(mask)
 
+    # Osztályozás + lakosság becslés (feltöltött logika)
     results = []
     total_pop = 0.0
     for i, b in enumerate(buildings):
@@ -250,16 +266,19 @@ def main():
 
     if st.button("Elemzés indítása"):
         with st.spinner("Elemzés folyamatban..."):
+            t0 = time.time()
             try:
                 orig, mask, buildings, total_pop = analyze(model, image, px_to_m)
             except Exception as e:
                 st.error(f"Hiba az elemzés során: {e}")
                 st.exception(e)
                 return
+            infer_time = time.time() - t0
 
         st.subheader("📊 Eredmények")
         st.metric("Épületek száma", len(buildings))
         st.metric("Lakosság becslés", f"{total_pop:.0f} fő")
+        st.metric("Futási idő", f"{infer_time:.2f} s")
 
         st.subheader("🖼️ Szegmentáció")
         overlay = orig.copy()
