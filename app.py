@@ -47,11 +47,24 @@ def enhance_with_clahe(image: Image.Image) -> Image.Image:
     enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
     return Image.fromarray(enhanced)
 
-def normalize(img_array: np.ndarray) -> np.ndarray:
-    mean = np.array([0.339, 0.324, 0.285], dtype=np.float32)
-    std = np.array([0.139, 0.125, 0.122], dtype=np.float32)
-    img_float = img_array.astype(np.float32) / 255.0
-    return (img_float - mean) / std
+# SpaceNet-szerű előfeldolgozás
+SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
+SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
+
+def spacenet_preprocessing(image_or_array) -> np.ndarray:
+    """SpaceNet-szerű előfeldolgozás: RGB csatornák egységesítése + SpaceNet mean/std normalizálás."""
+    if isinstance(image_or_array, Image.Image):
+        img = np.array(image_or_array)
+    else:
+        img = image_or_array
+
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    elif img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+
+    img_float = img.astype(np.float32) / 255.0
+    return (img_float - SPACENET_MEAN) / SPACENET_STD
 
 def segment_buildings(mask: np.ndarray, min_size: int = 50):
     binary_mask = (mask > 0.4).astype(np.uint8)
@@ -71,10 +84,6 @@ def segment_buildings(mask: np.ndarray, min_size: int = 50):
         h = stats[i, cv2.CC_STAT_HEIGHT]
         buildings.append({'area': area, 'bbox': (x, y, w, h), 'centroid': centroids[i]})
     return buildings
-
-# ===============================
-# OSZTÁLYOZÓ MÓDSZER
-# ===============================
 
 def estimate_building_type(area_m2: float) -> str:
     if area_m2 < 250:
@@ -127,6 +136,43 @@ def load_model():
         return None
 
 # ===============================
+# INPUT ADAPTÁLÁS A MODELLHEZ
+# ===============================
+
+def make_input_tensor(model, orig_rgb: np.ndarray) -> tuple[np.ndarray, bool, tuple[int,int]]:
+    """
+    SpaceNet-szerű előfeldolgozás + méret és csatornasorrend igazítása a modell input_shape alapján.
+    Visszaad: (input_tensor, channels_last, (target_h, target_w))
+    """
+    input_shape = model.input_shape
+    if isinstance(input_shape, list):
+        input_shape = input_shape[0]
+
+    # Döntés channels_last vs channels_first és célméret
+    if len(input_shape) == 4:
+        if input_shape[-1] in (1, 3):  # channels_last: (None, H, W, C)
+            channels_last = True
+            target_h = input_shape[1] if input_shape[1] else 256
+            target_w = input_shape[2] if input_shape[2] else 256
+        else:  # channels_first: (None, C, H, W)
+            channels_last = False
+            target_h = input_shape[2] if input_shape[2] else 256
+            target_w = input_shape[3] if input_shape[3] else 256
+    else:
+        channels_last = True
+        target_h, target_w = 256, 256
+
+    resized = cv2.resize(orig_rgb, (target_w, target_h))
+    pre = spacenet_preprocessing(resized)  # SpaceNet-szerű normalizálás
+
+    if channels_last:
+        input_tensor = pre[None, ...]            # (1, H, W, C)
+    else:
+        input_tensor = np.transpose(pre, (2, 0, 1))[None, ...]  # (1, C, H, W)
+
+    return input_tensor, channels_last, (target_h, target_w)
+
+# ===============================
 # ANALÍZIS FUNKCIÓ
 # ===============================
 
@@ -135,28 +181,28 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
     orig = np.array(image.convert("RGB"))
     h, w = orig.shape[:2]
 
-    # Modell input shape alapján igazítás
-    input_shape = model.input_shape
-    if isinstance(input_shape, list):
-        input_shape = input_shape[0]
+    input_tensor, channels_last, _ = make_input_tensor(model, orig)
 
-    if input_shape[-1] == 3:  # channels_last
-        target_h, target_w = input_shape[1], input_shape[2]
-        resized = cv2.resize(orig, (target_w, target_h))
-        norm = normalize(resized)[None, ...]  # (1, H, W, C)
-    elif input_shape[1] == 3:  # channels_first
-        target_h, target_w = input_shape[2], input_shape[3]
-        resized = cv2.resize(orig, (target_w, target_h))
-        norm = np.transpose(normalize(resized), (2,0,1))[None, ...]  # (1, C, H, W)
-    else:
-        raise ValueError(f"Nem támogatott input shape: {input_shape}")
-
-    st.write("DEBUG input_img.shape:", norm.shape)
-
-    pred = model.predict(norm, verbose=0)
+    pred = model.predict(input_tensor, verbose=0)
     pred0 = pred[0] if isinstance(pred, (list, tuple)) else pred
-    mask = cv2.resize(pred0[0, :, :, 0], (w, h), interpolation=cv2.INTER_NEAREST)
 
+    # Maszk kinyerése: támogatjuk (B,H,W,C) és (B,C,H,W) esetet
+    if pred0.ndim == 4:
+        p = pred0[0]
+        if channels_last:
+            mask_small = p[..., 0]
+        else:
+            mask_small = p[0, ...]
+    elif pred0.ndim == 3:
+        # ritkább eset, de kezeljük
+        if channels_last:
+            mask_small = pred0[..., 0]
+        else:
+            mask_small = pred0[0, ...]
+    else:
+        raise ValueError(f"Váratlan predikciós alak: {pred0.shape}")
+
+    mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
     buildings = segment_buildings(mask)
 
     results = []
@@ -181,7 +227,7 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
 # ===============================
 
 def main():
-    st.title("🏠 Épület Analizátor lakosságszám becsléssel")
+    st.title("🏠 Épület Analizátor lakosságszám becsléssel (SpaceNet előfeldolgozás)")
     st.sidebar.header("Beállítások")
 
     px_to_m = st.sidebar.slider("Pixel → méter", 0.1, 2.0, 0.5, 0.1)
@@ -191,18 +237,25 @@ def main():
         st.error("❌ Modell betöltése sikertelen. Ellenőrizd a model.h5 fájlt és a kompatibilitást.")
         return
 
-    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "jpeg", "png"])
+    st.caption("Modell információk")
+    st.write("• Input shape:", model.input_shape)
 
+    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "jpeg", "png"])
     if uploaded is None:
         st.info("Tölts fel egy képet a kezdéshez.")
         return
 
     image = Image.open(uploaded)
-    st.image(image, caption="Feltöltött kép", use_column_width=True)
+    st.image(image, caption=f"Feltöltött kép — {image.size[0]}×{image.size[1]}", use_column_width=True)
 
     if st.button("Elemzés indítása"):
         with st.spinner("Elemzés folyamatban..."):
-            orig, mask, buildings, total_pop = analyze(model, image, px_to_m)
+            try:
+                orig, mask, buildings, total_pop = analyze(model, image, px_to_m)
+            except Exception as e:
+                st.error(f"Hiba az elemzés során: {e}")
+                st.exception(e)
+                return
 
         st.subheader("📊 Eredmények")
         st.metric("Épületek száma", len(buildings))
@@ -212,13 +265,13 @@ def main():
         overlay = orig.copy()
         overlay[mask > 0.5] = [255, 0, 0]
         result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-        st.image(result_img, caption="Szegmentált kép", use_column_width=True)
+        st.image(result_img, caption="Szegmentált kép (piros = épület)", use_column_width=True)
 
         st.subheader("📦 Épületek")
         vis = orig.copy()
         for b in buildings:
-            x, y, w, h = b['bbox']
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            x, y, w_box, h_box = b['bbox']
+            cv2.rectangle(vis, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
             label = f"{b['type']} ({b['population']} fő)"
             cv2.putText(vis, label, (x, max(0, y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         st.image(vis, caption="Detektált épületek", use_column_width=True)
