@@ -243,7 +243,7 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
 # ===============================
 
 def main():
-    st.title("🏠 Épület Analizátor lakosságszám becsléssel (SpaceNet előfeldolgozás)")
+    st.title("Épületek szegmentálása és népesség becslése szakdolgozat")
     st.sidebar.header("Beállítások")
 
     px_to_m = st.sidebar.slider("Pixel → méter", 0.1, 2.0, 0.5, 0.1)
@@ -282,7 +282,7 @@ def main():
 
         st.subheader("🖼️ Szegmentáció")
         overlay = orig.copy()
-        overlay[mask > 0.5] = [255, 0, 0]
+        overlay[mask > 0.5] = [0, 0, 255]
         result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
         st.image(result_img, caption="Szegmentált kép (piros = épület)", use_column_width=True)
 
