@@ -8,6 +8,30 @@ import tensorflow as tf
 from tensorflow.keras import backend as K
 from PIL import Image
 import time
+import math
+
+def meters_per_pixel_web_mercator(latitude_deg: float, zoom: int) -> float:
+    R = 6378137.0  # WGS84 Earth radius (m)
+    lat_rad = math.radians(latitude_deg)
+    return math.cos(lat_rad) * (2 * math.pi * R) / (256 * (2 ** zoom))
+
+def compute_px_to_m_mode(mode: str,
+                         manual_px_to_m: float,
+                         latitude_deg: float | None,
+                         zoom: int | None,
+                         known_real_m: float | None,
+                         measured_pixels: float | None) -> float:
+    if mode == "Auto (Google Maps)":
+        if latitude_deg is None or zoom is None:
+            return manual_px_to_m
+        return meters_per_pixel_web_mercator(latitude_deg, zoom)
+    elif mode == "Kalibráció (ismert tárgy)":
+        if known_real_m is None or measured_pixels is None or measured_pixels <= 0:
+            return manual_px_to_m
+        return known_real_m / measured_pixels
+    else:
+        return manual_px_to_m
+
 
 # ===============================
 # ALAP BEÁLLÍTÁSOK
@@ -280,9 +304,30 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, threshold: float = 
 
 def main():
     st.title("Épületek szegmentálása és népesség becslése szakdolgozat")
-    st.sidebar.header("Beállítások")
+    st.sidebar.header("Méret normalizálás (MPP)")
+    mode = st.sidebar.selectbox("MPP mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció (ismert tárgy)"])
 
-    px_to_m = st.sidebar.slider("Pixel → méter", 0.1, 2.0, 0.5, 0.1)
+    # Kézi slider
+    manual_px_to_m = st.sidebar.slider("Pixel → méter (kézi)", 0.05, 5.0, 0.5, 0.05)
+
+    # Auto (Google Maps)
+    if mode == "Auto (Google Maps)":
+        latitude_deg = st.sidebar.number_input("Szélesség (°)", value=47.4979, help="Budapest példa: ~47.5")
+        zoom = st.sidebar.number_input("Zoom (integer)", min_value=0, max_value=22, value=18, step=1,
+                                   help="Web Mercator csempézés zoom-szint")
+    else:
+        latitude_deg, zoom = None, None
+
+    # Kalibráció (ismert tárgy)
+    if mode == "Kalibráció (ismert tárgy)":
+        known_real_m = st.sidebar.number_input("Ismert távolság / tárgy méret (m)", min_value=0.0, value=100.0)
+        measured_pixels = st.sidebar.number_input("Képen mért pixel távolság (px)", min_value=0.0, value=200.0)
+    else:
+        known_real_m, measured_pixels = None, None
+
+    px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, latitude_deg, zoom, known_real_m, measured_pixels)
+    st.sidebar.caption(f"Aktív MPP: ~{px_to_m:.4f} m/px")
+
     threshold = st.sidebar.slider("Maszk threshold", 0.0, 1.0, 0.5, 0.05)
 
     model = load_model()
