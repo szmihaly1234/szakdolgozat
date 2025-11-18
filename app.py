@@ -70,12 +70,31 @@ def spacenet_preprocessing(image_or_array) -> np.ndarray:
     img_float = img.astype(np.float32) / 255.0
     return (img_float - SPACENET_MEAN) / SPACENET_STD
 
-def segment_buildings(mask: np.ndarray, min_size: int = 50):
-    binary_mask = (mask > 0.5).astype(np.uint8)
+def pad_to_square_by_longer_side(img: np.ndarray) -> np.ndarray:
+    """
+    Tükrözéssel kipaddel a rövidebb oldalt, hogy a kép négyzet legyen a hosszabb oldal méretével.
+    Nem vág, nem torzít: reflect paddinggel bővít.
+    """
+    h, w = img.shape[:2]
+    if h == w:
+        return img.copy()
+    size = max(h, w)
+    pad_top = (size - h) // 2
+    pad_bottom = size - h - pad_top
+    pad_left = (size - w) // 2
+    pad_right = size - w - pad_left
+    # Reflect padding (jobb minőség, mint fekete kitöltés)
+    padded = cv2.copyMakeBorder(img, pad_top, pad_bottom, pad_left, pad_right, borderType=cv2.BORDER_REFLECT_101)
+    return padded
+
+def segment_buildings_from_binary(binary_mask: np.ndarray, min_size: int = 50):
+    """
+    Épületek szegmentálása már thresholdolt bináris maszkból (0/1).
+    """
     kernel = np.ones((3, 3), np.uint8)
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
-    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+    clean = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
+    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(clean, connectivity=8)
 
     buildings = []
     for i in range(1, num_labels):
@@ -100,6 +119,7 @@ BUILDING_TYPE_POPULATION = {
 }
 
 def estimate_building_type(area_m2: float) -> str:
+    # A feltöltött logika szerint
     if area_m2 < 100:
         return 'kis_lakohaz'
     elif area_m2 < 300:
@@ -156,7 +176,7 @@ def load_model():
 # INPUT ADAPTÁLÁS A MODELLHEZ
 # ===============================
 
-def make_input_tensor(model, orig_rgb: np.ndarray) -> tuple[np.ndarray, bool, tuple[int,int]]:
+def make_input_tensor(model, square_rgb: np.ndarray) -> tuple[np.ndarray, bool, tuple[int,int]]:
     """
     SpaceNet-szerű előfeldolgozás + méret és csatornasorrend igazítása a modell input_shape alapján.
     Visszaad: (input_tensor, channels_last, (target_h, target_w))
@@ -165,22 +185,21 @@ def make_input_tensor(model, orig_rgb: np.ndarray) -> tuple[np.ndarray, bool, tu
     if isinstance(input_shape, list):
         input_shape = input_shape[0]
 
-    # Döntés channels_last vs channels_first és célméret
     if len(input_shape) == 4:
         if input_shape[-1] in (1, 3):  # channels_last: (None, H, W, C)
             channels_last = True
-            target_h = input_shape[1] if input_shape[1] else 256
-            target_w = input_shape[2] if input_shape[2] else 256
+            target_h = input_shape[1] if input_shape[1] else square_rgb.shape[0]
+            target_w = input_shape[2] if input_shape[2] else square_rgb.shape[1]
         else:  # channels_first: (None, C, H, W)
             channels_last = False
-            target_h = input_shape[2] if input_shape[2] else 256
-            target_w = input_shape[3] if input_shape[3] else 256
+            target_h = input_shape[2] if input_shape[2] else square_rgb.shape[0]
+            target_w = input_shape[3] if input_shape[3] else square_rgb.shape[1]
     else:
         channels_last = True
-        target_h, target_w = 256, 256
+        target_h, target_w = square_rgb.shape[:2]
 
-    resized = cv2.resize(orig_rgb, (target_w, target_h))
-    pre = spacenet_preprocessing(resized)  # SpaceNet-szerű normalizálás
+    resized = cv2.resize(square_rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    pre = spacenet_preprocessing(resized)
 
     if channels_last:
         input_tensor = pre[None, ...]            # (1, H, W, C)
@@ -193,13 +212,17 @@ def make_input_tensor(model, orig_rgb: np.ndarray) -> tuple[np.ndarray, bool, tu
 # ANALÍZIS FUNKCIÓ
 # ===============================
 
-def analyze(model, image: Image.Image, px_to_m: float = 0.5):
+def analyze(model, image: Image.Image, px_to_m: float = 0.5, threshold: float = 0.5):
     # Előkészítés + SpaceNet pipeline
     image = enhance_with_clahe(image)
     orig = np.array(image.convert("RGB"))
     h, w = orig.shape[:2]
 
-    input_tensor, channels_last, _ = make_input_tensor(model, orig)
+    # Négyzetesítés a hosszabb oldal alapján (reflect padding, majd középső square)
+    square = pad_to_square_by_longer_side(orig)
+
+    # Modell input előkészítése
+    input_tensor, channels_last, _ = make_input_tensor(model, square)
 
     # Inference
     pred = model.predict(input_tensor, verbose=0)
@@ -208,19 +231,31 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
     # Maszk kinyerése
     if pred0.ndim == 4:
         p = pred0[0]
-        mask_small = p[..., 0] if channels_last else p[0, ...]
+        mask_square = p[..., 0] if channels_last else p[0, ...]
     elif pred0.ndim == 3:
-        mask_small = pred0[..., 0] if channels_last else pred0[0, ...]
+        mask_square = pred0[..., 0] if channels_last else pred0[0, ...]
     else:
         raise ValueError(f"Váratlan predikciós alak: {pred0.shape}")
 
-    # Maszk visszaméretezése
-    mask = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+    # Maszk visszavetítése az eredeti kép méretére: a padded square-ből kivágjuk a középső eredeti elhelyezkedést
+    # Először a square maszkot a square méretére igazítjuk (ha az input_resize eltért)
+    mask_square_resized = cv2.resize(mask_square, (square.shape[1], square.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-    # Épületek
-    buildings = segment_buildings(mask)
+    # Mivel square a pad_to_square_by_longer_side-ból jön, az orig kép középen helyezkedik el benne.
+    # Ezt a maszkot a square-ből az orig méretének megfelelő középső régióra vágjuk, majd az orig vászonra tesszük.
+    # Kiszámoljuk a középső crop pozíciót:
+    size = max(h, w)
+    start_y = (size - h) // 2
+    start_x = (size - w) // 2
+    mask_orig_region = mask_square_resized[start_y:start_y + h, start_x:start_x + w]
 
-    # Osztályozás + lakosság becslés (feltöltött logika)
+    # Threshold alkalmazása csúszka értékkel
+    binary_mask = (mask_orig_region > threshold).astype(np.uint8)
+
+    # Épületek kinyerése
+    buildings = segment_buildings_from_binary(binary_mask, min_size=50)
+
+    # Osztályozás + lakosság becslés
     results = []
     total_pop = 0.0
     for i, b in enumerate(buildings):
@@ -236,7 +271,8 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5):
             'bbox': b['bbox']
         })
 
-    return orig, mask, results, total_pop
+    # Visszaadjuk a folytonos maszkot is vizualizációhoz
+    return orig, mask_orig_region, binary_mask, results, total_pop
 
 # ===============================
 # STREAMLIT FELÜLET
@@ -247,6 +283,7 @@ def main():
     st.sidebar.header("Beállítások")
 
     px_to_m = st.sidebar.slider("Pixel → méter", 0.1, 2.0, 0.5, 0.1)
+    threshold = st.sidebar.slider("Maszk threshold", 0.0, 1.0, 0.5, 0.05)
 
     model = load_model()
     if model is None:
@@ -268,7 +305,7 @@ def main():
         with st.spinner("Elemzés folyamatban..."):
             t0 = time.time()
             try:
-                orig, mask, buildings, total_pop = analyze(model, image, px_to_m)
+                orig, mask_continuous, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
             except Exception as e:
                 st.error(f"Hiba az elemzés során: {e}")
                 st.exception(e)
@@ -280,11 +317,11 @@ def main():
         st.metric("Lakosság becslés", f"{total_pop:.0f} fő")
         st.metric("Futási idő", f"{infer_time:.2f} s")
 
-        st.subheader("🖼️ Szegmentáció")
+        st.subheader("🖼️ Szegmentáció (threshold alkalmazva)")
         overlay = orig.copy()
-        overlay[mask > 0.5] = [0, 0, 255]
+        overlay[mask_binary.astype(bool)] = [0, 0, 255]
         result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-        st.image(result_img, caption="Szegmentált kép (piros = épület)", use_column_width=True)
+        st.image(result_img, caption=f"Szegmentált kép (kék = épület, threshold={threshold:.2f})", use_column_width=True)
 
         st.subheader("📦 Épületek")
         vis = orig.copy()
