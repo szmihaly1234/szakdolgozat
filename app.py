@@ -184,7 +184,7 @@ def load_model_with_weights(weights_path=None):
             def __init__(self, *args, groups=None, **kwargs):
                 super().__init__(*args, **kwargs)
 
-        # 1. Alapmodell betöltése (szerkezet)
+        # 1. Alapmodell betöltése
         model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects={
@@ -194,18 +194,32 @@ def load_model_with_weights(weights_path=None):
             },
             compile=False
         )
-
-        # 2. Ha van weights_path, rátöltjük a súlyokat
-        if weights_path:
-            print(f"Súlyok betöltése: {weights_path}")
-            model.load_weights(weights_path)
         
-        return model
+        # DEBUG: Ellenőrzés
+        msg = "Alapmodell (Globális) betöltve."
+
+        # 2. Súlyok betöltése
+        if weights_path:
+            if os.path.exists(weights_path):
+                file_size = os.path.getsize(weights_path)
+                if file_size < 1000: # Ha gyanúsan kicsi (pl. hibaüzenet van benne)
+                    st.error(f"HIBA: A súlyfájl túl kicsi ({file_size} bájt)! Valószínűleg rossz a letöltés.")
+                    return None
+                
+                # Súlyok betöltése
+                model.load_weights(weights_path)
+                msg = f"✅ SIKER: Párizsi súlyok betöltve! (Fájl: {weights_path}, Méret: {file_size/1024/1024:.2f} MB)"
+            else:
+                st.error(f"HIBA: A fájl nem található: {weights_path}")
+                return None
+        
+        # Kiírjuk a UI-ra (csak egyszer fog megjelenni, amikor betölt)
+        print(msg) 
+        return model, msg
 
     except Exception as e:
-        st.error(f"Modell betöltési hiba: {e}")
-        return None
-
+        st.error(f"Kritikus hiba a modell betöltésekor: {e}")
+        return None, str(e)
 # ===============================
 # INPUT ADAPTÁLÁS
 # ===============================
@@ -293,97 +307,77 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, threshold: float = 
 # ===============================
 
 def main():
-    st.title("Épületek szegmentálása és népesség becslése szakdolgozat")
+    st.title("Épületek szegmentálása - Debug Mód 🛠️")
     
-    # --- MODELL VÁLASZTÓ ---
     st.sidebar.header("Modell verzió")
     model_option = st.sidebar.radio(
         "Válassz modellt:",
         ("Globális (Eredeti)", "Európa/Párizs (Finomhangolt)")
     )
     
-    # Logika: Melyik súlyfájl kell?
     active_weights_path = None
-    
     if model_option == "Európa/Párizs (Finomhangolt)":
-        with st.spinner("Európai súlyok letöltése Drive-ról..."):
+        with st.spinner("Súlyok letöltése..."):
             ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
         active_weights_path = WEIGHTS_PATH
 
+    # --- MODELL BETÖLTÉS ÉS VISSZAIGAZOLÁS ---
+    # Most már visszaad egy üzenetet is
+    model, status_msg = load_model_with_weights(active_weights_path)
+    
+    if model is None:
+        st.error("A modell nem töltődött be.")
+        return
+
+    # KIÍRJUK A STÁTUSZT A KÉPERNYŐRE
+    if "SIKER" in status_msg:
+        st.success(status_msg)
+    else:
+        st.info(status_msg)
+
     # --- MÉRET NORMALIZÁLÁS ---
+    # ... (A kódod többi része változatlanul jön ide: MPP slider, feltöltés, stb.) ...
     st.sidebar.header("Méret normalizálás (MPP)")
+    # ... (Ide másold be a korábbi kódodat a sliderekkel) ...
     mode = st.sidebar.selectbox("MPP mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció (ismert tárgy)"])
-
     manual_px_to_m = st.sidebar.slider("Pixel → méter (kézi)", 0.05, 5.0, 0.5, 0.05)
-
+    
     if mode == "Auto (Google Maps)":
-        latitude_deg = st.sidebar.number_input("Szélesség (°)", value=47.4979, help="Budapest példa: ~47.5")
-        zoom = st.sidebar.number_input("Zoom (integer)", min_value=0, max_value=22, value=18, step=1)
+        latitude_deg = st.sidebar.number_input("Szélesség (°)", value=47.4979)
+        zoom = st.sidebar.number_input("Zoom (integer)", min_value=0, max_value=22, value=18)
     else:
         latitude_deg, zoom = None, None
 
     if mode == "Kalibráció (ismert tárgy)":
-        known_real_m = st.sidebar.number_input("Ismert távolság / tárgy méret (m)", min_value=0.0, value=100.0)
-        measured_pixels = st.sidebar.number_input("Képen mért pixel távolság (px)", min_value=0.0, value=200.0)
+        known_real_m = st.sidebar.number_input("Ismert távolság (m)", value=100.0)
+        measured_pixels = st.sidebar.number_input("Mért pixel (px)", value=200.0)
     else:
         known_real_m, measured_pixels = None, None
 
     px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, latitude_deg, zoom, known_real_m, measured_pixels)
-    st.sidebar.caption(f"Aktív MPP: ~{px_to_m:.4f} m/px")
+    threshold = st.sidebar.slider("Threshold", 0.0, 1.0, 0.5)
 
-    threshold = st.sidebar.slider("Maszk threshold", 0.0, 1.0, 0.5, 0.05)
-
-    # MODELL BETÖLTÉSE
-    model = load_model_with_weights(active_weights_path)
+    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
     
-    if model is None:
-        return
-
-    st.caption("Modell információk")
-    st.write("• Input shape:", model.input_shape)
-
-    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "jpeg", "png"])
-    if uploaded is None:
-        st.info("Tölts fel egy képet a kezdéshez.")
-        return
-
-    image = Image.open(uploaded)
-    st.image(image, caption=f"Feltöltött kép — {image.size[0]}×{image.size[1]}", use_column_width=True)
-
-    if st.button("Elemzés indítása"):
-        with st.spinner("Elemzés folyamatban..."):
-            t0 = time.time()
-            try:
-                orig, mask_continuous, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
-            except Exception as e:
-                st.error(f"Hiba az elemzés során: {e}")
-                st.exception(e)
-                return
-            infer_time = time.time() - t0
-
-        st.subheader("📊 Eredmények")
-        st.metric("Épületek száma", len(buildings))
-        st.metric("Lakosság becslés", f"{total_pop:.0f} fő")
-        st.metric("Futási idő", f"{infer_time:.2f} s")
-
-        st.subheader("🖼️ Szegmentáció")
-        overlay = orig.copy()
-        overlay[mask_binary.astype(bool)] = [0, 0, 255]
-        result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-        st.image(result_img, caption=f"Szegmentált kép (threshold={threshold:.2f})", use_column_width=True)
-
-        st.subheader("📦 Épületek")
-        vis = orig.copy()
-        for b in buildings:
-            x, y, w_box, h_box = b['bbox']
-            cv2.rectangle(vis, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
-            label = f"{b['type']} ({b['population']} fő)"
-            cv2.putText(vis, label, (x, max(0, y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        st.image(vis, caption="Detektált épületek", use_column_width=True)
-
-        st.subheader("💾 Export")
-        df = pd.DataFrame(buildings)
-        st.download_button("CSV letöltése", df.to_csv(index=False), "epulet_adatok.csv", "text/csv")
+    if uploaded:
+        image = Image.open(uploaded)
+        st.image(image, caption="Feltöltött kép", use_column_width=True)
+        
+        if st.button("Elemzés"):
+             with st.spinner("Elemzés..."):
+                # Elemzés futtatása
+                orig, _, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
+                
+                # EREDMÉNYEK KIÍRÁSA
+                st.subheader(f"Eredmény ({model_option})")
+                
+                # 1. Overlay megjelenítése
+                overlay = orig.copy()
+                # Zöld szín a finomhangolt modellnek, Piros az eredetinek (vizuális különbségtétel)
+                color = [0, 255, 0] if active_weights_path else [0, 0, 255] 
+                overlay[mask_binary.astype(bool)] = color
+                result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
+                st.image(result_img, caption=f"Szegmentáció - {len(buildings)} épület", use_column_width=True)
 
 if __name__ == "__main__":
     main()
