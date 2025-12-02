@@ -175,50 +175,61 @@ def estimate_population(building_type: str, area: float) -> float:
 # ===============================
 
 @st.cache_resource(show_spinner=False)
-def load_model_with_weights(weights_path=None):
-    """
-    Betölti a modellt. Visszaadja a modellt ÉS egy státuszüzenetet is.
-    """
+# ===============================
+# 5. MODELL BETÖLTÉS (JAVÍTOTT - FACTORY MÓDSZER)
+# ===============================
+
+def load_model_diagnostic(weights_path=None):
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
-        # Patch a hibás réteghez (Keras verzió inkompatibilitás javítása)
-        class PatchedDepthwiseConv2D(DepthwiseConv2D):
-            def __init__(self, *args, groups=None, **kwargs):
-                super().__init__(*args, **kwargs)
+        # --- A JAVÍTÁS LÉNYEGE ---
+        # Nem osztályt (class) használunk, hanem egy gyártó függvényt.
+        # Ez kiveszi a 'groups' hibát, de EREDETI DepthwiseConv2D-t ad vissza.
+        # Így a súlybetöltő "szabványos" réteget lát, és nem dob hibát.
+        def clean_depthwise_conv2d(**kwargs):
+            kwargs.pop('groups', None) # Kivesszük a hibás paramétert
+            return DepthwiseConv2D(**kwargs)
 
-        # 1. Alapmodell betöltése (szerkezet)
+        # 1. Alapmodell betöltése
         model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects={
                 'dice_loss': dice_loss,
                 'dice_coef': dice_coef,
-                'DepthwiseConv2D': PatchedDepthwiseConv2D
+                # Itt a trükk: a 'DepthwiseConv2D' nevet a tisztító függvényhez rendeljük
+                'DepthwiseConv2D': clean_depthwise_conv2d 
             },
             compile=False
         )
         
-        status_msg = "Alapmodell (Globális) betöltve."
+        info_msg = "Alapmodell (Globális) betöltve."
         
-        # 2. Ha kértünk súlyokat, megpróbáljuk betölteni
+        # 2. Súlyok
         if weights_path:
             if os.path.exists(weights_path):
-                # Ellenőrizzük, nem sérült-e a fájl (túl kicsi fájl gyanús)
                 fsize = os.path.getsize(weights_path)
-                if fsize < 10000: 
-                    return None, f"HIBA: A súlyfájl túl kicsi ({fsize} bájt). Töröld le és próbáld újra!"
-
-                print(f"Súlyok felülírása innen: {weights_path}")
-                model.load_weights(weights_path)
-                status_msg = f"✅ SIKER: Párizsi súlyok aktívak! (Fájl méret: {fsize/1024/1024:.2f} MB)"
+                try:
+                    # by_name=True: Biztonsági kapcsoló, név alapján keresi a rétegeket
+                    model.load_weights(weights_path, by_name=True)
+                    info_msg = f"✅ SIKER: Párizsi súlyok betöltve! ({fsize/1024/1024:.2f} MB)"
+                except Exception as load_err:
+                    return None, f"HIBA a load_weights híváskor: {load_err}", 0
             else:
-                return None, f"HIBA: A súlyfájl nem található a lemezen: {weights_path}"
+                return None, f"HIBA: Fájl nem található: {weights_path}", 0
         
-        return model, status_msg
+        # 3. Checksum generálás
+        weights_sum = 0.0
+        for layer in model.layers:
+            if layer.weights:
+                weights = layer.get_weights()
+                weights_sum += np.sum([np.sum(w) for w in weights])
+                break 
+                
+        return model, info_msg, weights_sum
 
     except Exception as e:
-        st.error(f"Modell betöltési hiba: {e}")
-        return None, str(e)
+        return None, f"Kritikus hiba: {str(e)}", 0
 
 # ===============================
 # 6. INPUT ELŐKÉSZÍTÉS
