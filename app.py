@@ -24,7 +24,7 @@ WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság számláló (JAVÍTOTT)", page_icon="🛠️", layout="wide")
+st.set_page_config(page_title="Lakosság számláló (FINAL FIX)", page_icon="🛠️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
@@ -139,15 +139,14 @@ def estimate_population(building_type, area):
     return base_pop
 
 # ===============================
-# 5. MODELL BETÖLTÉS (JAVÍTOTT FÜGGVÉNNYEL)
+# 5. MODELL BETÖLTÉS (JAVÍTVA: by_name NÉLKÜL)
 # ===============================
 
 def load_model_with_weights(weights_path=None):
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
-        # JAVÍTÁS: Factory függvény, ami kivesszi a hibás 'groups' paramétert,
-        # de szabványos DepthwiseConv2D-t ad vissza.
+        # Factory függvény a groups hiba ellen
         def clean_depthwise_conv2d(**kwargs):
             kwargs.pop('groups', None)
             return DepthwiseConv2D(**kwargs)
@@ -158,7 +157,7 @@ def load_model_with_weights(weights_path=None):
             custom_objects={
                 'dice_loss': dice_loss, 
                 'dice_coef': dice_coef, 
-                'DepthwiseConv2D': clean_depthwise_conv2d # Itt használjuk a tisztítót
+                'DepthwiseConv2D': clean_depthwise_conv2d
             },
             compile=False
         )
@@ -170,15 +169,16 @@ def load_model_with_weights(weights_path=None):
             if os.path.exists(weights_path):
                 fsize = os.path.getsize(weights_path)
                 try:
-                    # JAVÍTÁS: by_name=True a biztos párosításhoz
-                    model.load_weights(weights_path, by_name=True)
+                    # JAVÍTÁS ITT: Töröltem a by_name=True paramétert!
+                    model.load_weights(weights_path)
+                    
                     info_msg = f"✅ SIKER: Párizsi súlyok betöltve! ({fsize/1024/1024:.2f} MB)"
                 except Exception as load_err:
                     return None, f"HIBA a load_weights híváskor: {load_err}", 0
             else:
                 return None, f"HIBA: Fájl nem található: {weights_path}", 0
         
-        # 3. ELLENŐRZŐ SZÁM GENERÁLÁSA
+        # 3. ELLENŐRZŐ SZÁM
         weights_sum = 0.0
         for layer in model.layers:
             if layer.weights:
@@ -276,8 +276,7 @@ def main():
             ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
         active_weights_path = WEIGHTS_PATH
 
-    # --- MODELL BETÖLTÉS ÉS CHECKSUM ---
-    # Most már biztosan egyezik a hívás és a definíció neve
+    # --- MODELL BETÖLTÉS ---
     model, status_msg, check_sum = load_model_with_weights(active_weights_path)
     
     if model is None:
