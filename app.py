@@ -11,14 +11,14 @@ import time
 import math
 
 # ===============================
-# KONFIGURÁCIÓ ÉS DRIVE LETÖLTÉS
+# 1. KONFIGURÁCIÓ ÉS FÁJLOK
 # ===============================
 
-# 1. EREDETI MODELL (A teljes szerkezet)
+# EREDETI MODELL (A szerkezet innen jön)
 MODEL_FILE_ID = "19Mw_N1ilU58ipoQ6-BdSbPVtHAlSsn2u"
 MODEL_PATH = "model.h5"
 
-# 2. ÚJ SÚLYOK (Párizs/Európa) - BEILLESZTVE A DRIVE LINKED ALAPJÁN
+# ÚJ SÚLYOK (Párizs/Európa) - A te feltöltött fájlod
 WEIGHTS_FILE_ID = "1yMIvlRR6mqKLQ46k9Gh-cvGi83mPJnIB" 
 WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 
@@ -26,29 +26,28 @@ def ensure_file_from_drive(file_id, output_path):
     """Ellenőrzi, hogy megvan-e a fájl, ha nincs, letölti Drive-ról."""
     if not os.path.exists(output_path):
         url = f"https://drive.google.com/uc?id={file_id}"
+        # quiet=False, hogy lássuk a logot a konzolon, ha baj van
         gdown.download(url, output_path, quiet=False)
     return output_path
 
-# Induláskor az alapmodellt mindenképp letöltjük (mert a szerkezet kell)
+# Induláskor az alapmodellt mindenképp letöltjük (ez a "csontváz")
 if not os.path.exists(MODEL_PATH):
+    print("Alapmodell letöltése...")
     ensure_file_from_drive(MODEL_FILE_ID, MODEL_PATH)
 
 # ===============================
-# ALAP BEÁLLÍTÁSOK
+# 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság számláló", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="Lakosság számláló (Debug)", page_icon="🏠", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
-# ===============================
-# SpaceNet statok
-# ===============================
-
+# SpaceNet statisztikák a normalizáláshoz
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
 SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 
 # ===============================
-# HELYI FÜGGVÉNYEK
+# 3. SEGÉDFÜGGVÉNYEK (Matek, Képfeldolgozás)
 # ===============================
 
 def meters_per_pixel_web_mercator(latitude_deg: float, zoom: int) -> float:
@@ -135,7 +134,7 @@ def segment_buildings_from_binary(binary_mask: np.ndarray, min_size: int = 50):
     return buildings
 
 # ===============================
-# OSZTÁLYOZÓ LOGIKA
+# 4. OSZTÁLYOZÓ LOGIKA
 # ===============================
 
 BUILDING_TYPE_POPULATION = {
@@ -172,19 +171,23 @@ def estimate_population(building_type: str, area: float) -> float:
     return round(population, 1)
 
 # ===============================
-# MODELL BETÖLTÉS (SÚLYOK TÁMOGATÁSÁVAL)
+# 5. MODELL BETÖLTÉS (DEBUG VERZIÓ)
 # ===============================
 
 @st.cache_resource(show_spinner=False)
 def load_model_with_weights(weights_path=None):
+    """
+    Betölti a modellt. Visszaadja a modellt ÉS egy státuszüzenetet is.
+    """
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
+        # Patch a hibás réteghez (Keras verzió inkompatibilitás javítása)
         class PatchedDepthwiseConv2D(DepthwiseConv2D):
             def __init__(self, *args, groups=None, **kwargs):
                 super().__init__(*args, **kwargs)
 
-        # 1. Alapmodell betöltése
+        # 1. Alapmodell betöltése (szerkezet)
         model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects={
@@ -195,33 +198,30 @@ def load_model_with_weights(weights_path=None):
             compile=False
         )
         
-        # DEBUG: Ellenőrzés
-        msg = "Alapmodell (Globális) betöltve."
-
-        # 2. Súlyok betöltése
+        status_msg = "Alapmodell (Globális) betöltve."
+        
+        # 2. Ha kértünk súlyokat, megpróbáljuk betölteni
         if weights_path:
             if os.path.exists(weights_path):
-                file_size = os.path.getsize(weights_path)
-                if file_size < 1000: # Ha gyanúsan kicsi (pl. hibaüzenet van benne)
-                    st.error(f"HIBA: A súlyfájl túl kicsi ({file_size} bájt)! Valószínűleg rossz a letöltés.")
-                    return None
-                
-                # Súlyok betöltése
+                # Ellenőrizzük, nem sérült-e a fájl (túl kicsi fájl gyanús)
+                fsize = os.path.getsize(weights_path)
+                if fsize < 10000: 
+                    return None, f"HIBA: A súlyfájl túl kicsi ({fsize} bájt). Töröld le és próbáld újra!"
+
+                print(f"Súlyok felülírása innen: {weights_path}")
                 model.load_weights(weights_path)
-                msg = f"✅ SIKER: Párizsi súlyok betöltve! (Fájl: {weights_path}, Méret: {file_size/1024/1024:.2f} MB)"
+                status_msg = f"✅ SIKER: Párizsi súlyok aktívak! (Fájl méret: {fsize/1024/1024:.2f} MB)"
             else:
-                st.error(f"HIBA: A fájl nem található: {weights_path}")
-                return None
+                return None, f"HIBA: A súlyfájl nem található a lemezen: {weights_path}"
         
-        # Kiírjuk a UI-ra (csak egyszer fog megjelenni, amikor betölt)
-        print(msg) 
-        return model, msg
+        return model, status_msg
 
     except Exception as e:
-        st.error(f"Kritikus hiba a modell betöltésekor: {e}")
+        st.error(f"Modell betöltési hiba: {e}")
         return None, str(e)
+
 # ===============================
-# INPUT ADAPTÁLÁS
+# 6. INPUT ELŐKÉSZÍTÉS
 # ===============================
 
 def make_input_tensor(model, square_rgb: np.ndarray) -> tuple[np.ndarray, bool, tuple[int,int]]:
@@ -253,7 +253,7 @@ def make_input_tensor(model, square_rgb: np.ndarray) -> tuple[np.ndarray, bool, 
     return input_tensor, channels_last, (target_h, target_w)
 
 # ===============================
-# ANALÍZIS FUNKCIÓ
+# 7. ANALÍZIS FÜGGVÉNY
 # ===============================
 
 def analyze(model, image: Image.Image, px_to_m: float = 0.5, threshold: float = 0.5):
@@ -303,81 +303,121 @@ def analyze(model, image: Image.Image, px_to_m: float = 0.5, threshold: float = 
     return orig, mask_orig_region, binary_mask, results, total_pop
 
 # ===============================
-# STREAMLIT FELÜLET (MAIN)
+# 8. STREAMLIT FELÜLET (MAIN)
 # ===============================
 
 def main():
-    st.title("Épületek szegmentálása - Debug Mód 🛠️")
+    st.title("Épületek szegmentálása - Transfer Learning Demo 🛠️")
     
-    st.sidebar.header("Modell verzió")
+    # --- A. MODELL VÁLASZTÓ ---
+    st.sidebar.header("1. Modell Verzió")
     model_option = st.sidebar.radio(
-        "Válassz modellt:",
+        "Melyik tudást használjam?",
         ("Globális (Eredeti)", "Európa/Párizs (Finomhangolt)")
     )
     
+    # Logika: Csak akkor töltjük le és állítjuk be a súlyokat, ha a felhasználó kérte
     active_weights_path = None
+    
     if model_option == "Európa/Párizs (Finomhangolt)":
-        with st.spinner("Súlyok letöltése..."):
+        with st.spinner("Európai súlyok letöltése a Drive-ról..."):
+            # Itt hívjuk meg a letöltést
             ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
+        # Ha letöltöttük, beállítjuk az útvonalat
         active_weights_path = WEIGHTS_PATH
-
-    # --- MODELL BETÖLTÉS ÉS VISSZAIGAZOLÁS ---
-    # Most már visszaad egy üzenetet is
+    
+    # --- B. MODELL BETÖLTÉS ÉS VISSZAJELZÉS ---
     model, status_msg = load_model_with_weights(active_weights_path)
     
     if model is None:
-        st.error("A modell nem töltődött be.")
-        return
+        st.error("Kritikus hiba: A modell nem töltődött be!")
+        st.stop()
 
-    # KIÍRJUK A STÁTUSZT A KÉPERNYŐRE
+    # Állapotjelző csík
     if "SIKER" in status_msg:
         st.success(status_msg)
     else:
         st.info(status_msg)
 
-    # --- MÉRET NORMALIZÁLÁS ---
-    # ... (A kódod többi része változatlanul jön ide: MPP slider, feltöltés, stb.) ...
-    st.sidebar.header("Méret normalizálás (MPP)")
-    # ... (Ide másold be a korábbi kódodat a sliderekkel) ...
-    mode = st.sidebar.selectbox("MPP mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció (ismert tárgy)"])
+    # --- C. MÉRET NORMALIZÁLÁS (MPP) ---
+    st.sidebar.header("2. Méretarány (MPP)")
+    mode = st.sidebar.selectbox("Mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció (ismert tárgy)"])
+
     manual_px_to_m = st.sidebar.slider("Pixel → méter (kézi)", 0.05, 5.0, 0.5, 0.05)
-    
+
     if mode == "Auto (Google Maps)":
-        latitude_deg = st.sidebar.number_input("Szélesség (°)", value=47.4979)
-        zoom = st.sidebar.number_input("Zoom (integer)", min_value=0, max_value=22, value=18)
+        latitude_deg = st.sidebar.number_input("Szélesség (°)", value=47.4979, help="Budapest példa: ~47.5")
+        zoom = st.sidebar.number_input("Zoom (integer)", min_value=0, max_value=22, value=18, step=1)
     else:
         latitude_deg, zoom = None, None
 
     if mode == "Kalibráció (ismert tárgy)":
-        known_real_m = st.sidebar.number_input("Ismert távolság (m)", value=100.0)
-        measured_pixels = st.sidebar.number_input("Mért pixel (px)", value=200.0)
+        known_real_m = st.sidebar.number_input("Ismert távolság / tárgy méret (m)", min_value=0.0, value=100.0)
+        measured_pixels = st.sidebar.number_input("Képen mért pixel távolság (px)", min_value=0.0, value=200.0)
     else:
         known_real_m, measured_pixels = None, None
 
     px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, latitude_deg, zoom, known_real_m, measured_pixels)
-    threshold = st.sidebar.slider("Threshold", 0.0, 1.0, 0.5)
+    st.sidebar.caption(f"Aktív MPP: ~{px_to_m:.4f} m/px")
 
-    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
+    threshold = st.sidebar.slider("Maszk threshold (érzékenység)", 0.0, 1.0, 0.5, 0.05)
+
+    # --- D. KÉPFELTÖLTÉS ÉS ELEMZÉS ---
+    st.write("---")
+    uploaded = st.file_uploader("Kép feltöltése elemzéshez", type=["jpg", "jpeg", "png"])
     
-    if uploaded:
+    if uploaded is not None:
         image = Image.open(uploaded)
-        st.image(image, caption="Feltöltött kép", use_column_width=True)
-        
-        if st.button("Elemzés"):
-             with st.spinner("Elemzés..."):
-                # Elemzés futtatása
-                orig, _, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
-                
-                # EREDMÉNYEK KIÍRÁSA
-                st.subheader(f"Eredmény ({model_option})")
-                
-                # 1. Overlay megjelenítése
-                overlay = orig.copy()
-                # Zöld szín a finomhangolt modellnek, Piros az eredetinek (vizuális különbségtétel)
-                color = [0, 255, 0] if active_weights_path else [0, 0, 255] 
-                overlay[mask_binary.astype(bool)] = color
-                result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-                st.image(result_img, caption=f"Szegmentáció - {len(buildings)} épület", use_column_width=True)
+        st.image(image, caption=f"Feltöltött kép ({image.size[0]}x{image.size[1]})", use_column_width=True)
+
+        if st.button("Elemzés indítása"):
+            with st.spinner("Elemzés folyamatban..."):
+                t0 = time.time()
+                try:
+                    orig, mask_continuous, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
+                except Exception as e:
+                    st.error(f"Hiba az elemzés során: {e}")
+                    st.exception(e)
+                    st.stop()
+                infer_time = time.time() - t0
+
+            # EREDMÉNYEK
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Épületek száma", len(buildings))
+            col2.metric("Lakosság becslés", f"{total_pop:.0f} fő")
+            col3.metric("Futási idő", f"{infer_time:.2f} s")
+
+            st.subheader("🖼️ Szegmentáció Eredménye")
+            
+            # Vizuális visszajelzés: Zöld maszk = Párizs, Piros maszk = Eredeti
+            overlay_color = [0, 255, 0] if active_weights_path else [0, 0, 255] # Zöld vs Piros (BGR-ben a cv2 miatt ez Piros vs Kék lehet, de a lényeg, hogy más)
+            
+            # Matplotlib/RGB konverzió miatt:
+            # Ha cv2-t használunk (ami BGR), és RGB képet adunk neki:
+            # [0, 255, 0] -> Zöld
+            # [255, 0, 0] -> Piros
+            
+            vis_color = [0, 255, 0] if active_weights_path else [255, 0, 0]
+            
+            overlay = orig.copy()
+            overlay[mask_binary.astype(bool)] = vis_color
+            
+            result_img = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
+            st.image(result_img, caption=f"Szegmentált kép ({'Finomhangolt' if active_weights_path else 'Eredeti'} modell)", use_column_width=True)
+
+            st.subheader("📦 Detektált Épületek")
+            vis = orig.copy()
+            for b in buildings:
+                x, y, w_box, h_box = b['bbox']
+                cv2.rectangle(vis, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
+                # Felirat
+                label = f"{b['type']}"
+                cv2.putText(vis, label, (x, max(0, y - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            st.image(vis, caption="Bounding Boxok", use_column_width=True)
+
+            st.subheader("💾 Adatok Exportálása")
+            df = pd.DataFrame(buildings)
+            st.download_button("CSV letöltése", df.to_csv(index=False), "epulet_adatok.csv", "text/csv")
 
 if __name__ == "__main__":
     main()
