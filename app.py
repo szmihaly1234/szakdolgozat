@@ -24,7 +24,7 @@ WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság számláló (FINAL FIX)", page_icon="🛠️", layout="wide")
+st.set_page_config(page_title="Lakosság számláló (CLASS FIX)", page_icon="🛠️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
@@ -35,6 +35,7 @@ SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 # ===============================
 
 def ensure_file_from_drive(file_id, output_path):
+    # Ellenőrzés: ha létezik, de hibás (túl kicsi), töröljük
     if os.path.exists(output_path):
         if os.path.getsize(output_path) < 10000:
             print(f"Hibás (túl kicsi) fájl törlése: {output_path}")
@@ -139,37 +140,40 @@ def estimate_population(building_type, area):
     return base_pop
 
 # ===============================
-# 5. MODELL BETÖLTÉS (JAVÍTVA: by_name NÉLKÜL)
+# 5. MODELL BETÖLTÉS (JAVÍTOTT: CLASS MÓDSZER)
 # ===============================
 
 def load_model_with_weights(weights_path=None):
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
-        # Factory függvény a groups hiba ellen
-        def clean_depthwise_conv2d(**kwargs):
-            kwargs.pop('groups', None)
-            return DepthwiseConv2D(**kwargs)
+        # JAVÍTÁS: OSZTÁLY (Class) használata, pontosan úgy, ahogy a tanításnál volt.
+        # Ez megoldja a 'groups' hibát ÉS a súlybetöltési hibát is.
+        class FixedDepthwiseConv2D(DepthwiseConv2D):
+            def __init__(self, **kwargs):
+                kwargs.pop('groups', None) # Kivesszük a hibás paramétert
+                super().__init__(**kwargs)
 
-        # 1. Alapmodell
+        # 1. Alapmodell betöltése
+        # A custom_objects-ben a 'DepthwiseConv2D' kulcsot ehhez a javított osztályhoz rendeljük
         model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects={
                 'dice_loss': dice_loss, 
                 'dice_coef': dice_coef, 
-                'DepthwiseConv2D': clean_depthwise_conv2d
+                'DepthwiseConv2D': FixedDepthwiseConv2D 
             },
             compile=False
         )
         
         info_msg = "Alapmodell (Globális) betöltve."
         
-        # 2. Súlyok
+        # 2. Súlyok betöltése
         if weights_path:
             if os.path.exists(weights_path):
                 fsize = os.path.getsize(weights_path)
                 try:
-                    # JAVÍTÁS ITT: Töröltem a by_name=True paramétert!
+                    # Most már működnie kell a sima load_weights-nek is
                     model.load_weights(weights_path)
                     
                     info_msg = f"✅ SIKER: Párizsi súlyok betöltve! ({fsize/1024/1024:.2f} MB)"
@@ -178,7 +182,7 @@ def load_model_with_weights(weights_path=None):
             else:
                 return None, f"HIBA: Fájl nem található: {weights_path}", 0
         
-        # 3. ELLENŐRZŐ SZÁM
+        # 3. ELLENŐRZŐ SZÁM (Checksum)
         weights_sum = 0.0
         for layer in model.layers:
             if layer.weights:
