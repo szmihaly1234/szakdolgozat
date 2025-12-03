@@ -17,7 +17,7 @@ import math
 MODEL_FILE_ID = "19Mw_N1ilU58ipoQ6-BdSbPVtHAlSsn2u"
 MODEL_PATH = "model.h5"
 
-WEIGHTS_FILE_ID = "1yMIvlRR6mqKLQ46k9Gh-cvGi83mPJnIB" 
+WEIGHTS_FILE_ID = "1ZtwP8jlLVlrwGzjO_kmayUZlOVcHZGL5" 
 WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 
 # ===============================
