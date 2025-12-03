@@ -17,14 +17,14 @@ import math
 MODEL_FILE_ID = "19Mw_N1ilU58ipoQ6-BdSbPVtHAlSsn2u"
 MODEL_PATH = "model.h5"
 
-WEIGHTS_FILE_ID = "1ZtwP8jlLVlrwGzjO_kmayUZlOVcHZGL5" 
+WEIGHTS_FILE_ID = "1yMIvlRR6mqKLQ46k9Gh-cvGi83mPJnIB" 
 WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 
 # ===============================
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság számláló (CLASS FIX)", page_icon="🛠️", layout="wide")
+st.set_page_config(page_title="Lakosság számláló (CHECKSUM FIX)", page_icon="🏗️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
@@ -35,20 +35,15 @@ SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 # ===============================
 
 def ensure_file_from_drive(file_id, output_path):
-    # Ellenőrzés: ha létezik, de hibás (túl kicsi), töröljük
     if os.path.exists(output_path):
         if os.path.getsize(output_path) < 10000:
-            print(f"Hibás (túl kicsi) fájl törlése: {output_path}")
             os.remove(output_path)
-            
     if not os.path.exists(output_path):
         url = f"https://drive.google.com/uc?id={file_id}"
         gdown.download(url, output_path, quiet=False)
     return output_path
 
-# Alapmodell letöltése induláskor
 if not os.path.exists(MODEL_PATH):
-    print("Alapmodell letöltése...")
     ensure_file_from_drive(MODEL_FILE_ID, MODEL_PATH)
 
 def meters_per_pixel_web_mercator(latitude_deg, zoom):
@@ -140,22 +135,23 @@ def estimate_population(building_type, area):
     return base_pop
 
 # ===============================
-# 5. MODELL BETÖLTÉS (JAVÍTOTT: CLASS MÓDSZER)
+# 5. MODELL BETÖLTÉS (JAVÍTOTT CHECKSUM)
 # ===============================
 
-def load_model_with_weights(weights_path=None):
+@st.cache_resource(show_spinner=False)
+def load_model_pro(weights_path=None):
+    # Fontos: Session törlése, hogy biztosan tiszta lappal induljunk
+    K.clear_session()
+    
     try:
         from tensorflow.keras.layers import DepthwiseConv2D
 
-        # JAVÍTÁS: OSZTÁLY (Class) használata, pontosan úgy, ahogy a tanításnál volt.
-        # Ez megoldja a 'groups' hibát ÉS a súlybetöltési hibát is.
         class FixedDepthwiseConv2D(DepthwiseConv2D):
             def __init__(self, **kwargs):
-                kwargs.pop('groups', None) # Kivesszük a hibás paramétert
+                kwargs.pop('groups', None)
                 super().__init__(**kwargs)
 
-        # 1. Alapmodell betöltése
-        # A custom_objects-ben a 'DepthwiseConv2D' kulcsot ehhez a javított osztályhoz rendeljük
+        # 1. Alapmodell
         model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects={
@@ -166,29 +162,30 @@ def load_model_with_weights(weights_path=None):
             compile=False
         )
         
-        info_msg = "Alapmodell (Globális) betöltve."
+        info_msg = "Globális modell"
         
         # 2. Súlyok betöltése
         if weights_path:
             if os.path.exists(weights_path):
                 fsize = os.path.getsize(weights_path)
                 try:
-                    # Most már működnie kell a sima load_weights-nek is
                     model.load_weights(weights_path)
-                    
-                    info_msg = f"✅ SIKER: Párizsi súlyok betöltve! ({fsize/1024/1024:.2f} MB)"
+                    info_msg = f"Párizsi modell"
                 except Exception as load_err:
-                    return None, f"HIBA a load_weights híváskor: {load_err}", 0
+                    return None, f"HIBA: {load_err}", 0
             else:
-                return None, f"HIBA: Fájl nem található: {weights_path}", 0
+                return None, f"HIBA: Fájl nem található", 0
         
-        # 3. ELLENŐRZŐ SZÁM (Checksum)
+        # 3. CHECKSUM (Most már az UTOLSÓ 5 réteget nézzük!)
         weights_sum = 0.0
-        for layer in model.layers:
+        # A reversed() miatt a kimeneti (Output) rétegekkel kezdjük
+        count = 0
+        for layer in reversed(model.layers):
             if layer.weights:
                 weights = layer.get_weights()
-                weights_sum += np.sum([np.sum(w) for w in weights])
-                break 
+                weights_sum += np.sum([np.sum(np.abs(w)) for w in weights])
+                count += 1
+                if count >= 5: break # Csak az utolsó 5 réteg elég a különbséghez
                 
         return model, info_msg, weights_sum
 
@@ -264,40 +261,49 @@ def analyze(model, image, px_to_m, threshold):
 # 8. MAIN UI
 # ===============================
 
-def main():
-    st.title("Szegmentáció - Transfer Learning Demo 🛠️")
-    st.warning("Cache kikapcsolva a diagnosztikához.")
+def clear_model_cache():
+    st.cache_resource.clear()
 
-    # --- MODELL VÁLASZTÓ ---
-    col_sel, col_stat = st.columns([1, 1])
-    with col_sel:
-        st.subheader("1. Modell Verzió")
-        model_option = st.radio("Melyik tudást használjam?", ("Globális (Eredeti)", "Európa/Párizs (Finomhangolt)"))
+def main():
+    st.title("Lakosságszámláló - Végleges 🚀")
+
+    # --- SIDEBAR: MODELL ÉS SÚLY INFO ---
+    st.sidebar.title("⚙️ Beállítások")
+    
+    st.sidebar.subheader("1. Modell Verzió")
+    
+    model_option = st.sidebar.radio(
+        "Tudásbázis:",
+        ("Globális (Eredeti)", "Európa/Párizs (Finomhangolt)"),
+        on_change=clear_model_cache
+    )
     
     active_weights_path = None
     if model_option == "Európa/Párizs (Finomhangolt)":
-        with st.spinner("Súlyok letöltése..."):
+        with st.spinner("Súlyok ellenőrzése..."):
             ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
         active_weights_path = WEIGHTS_PATH
 
     # --- MODELL BETÖLTÉS ---
-    model, status_msg, check_sum = load_model_with_weights(active_weights_path)
+    with st.spinner("Modell betöltése memóriába..."):
+        model, status_msg, check_sum = load_model_pro(active_weights_path)
     
     if model is None:
         st.error(status_msg)
         st.stop()
 
-    with col_stat:
-        st.subheader("Modell Állapot")
-        if "SIKER" in status_msg:
-            st.success(status_msg)
-        else:
-            st.info(status_msg)
-        
-        st.metric("Súlyellenőrző összeg (Checksum)", f"{check_sum:.4f}", help="Ha ez változik, a modell cserélődött!")
+    st.sidebar.divider()
+    st.sidebar.info(f"Aktív: {status_msg}")
+    
+    # Checksum megjelenítése (Most már változnia KELL!)
+    st.sidebar.metric(
+        label="Checksum (Végződés)", 
+        value=f"{check_sum:.1f}",
+        delta="Más" if active_weights_path else "Eredeti"
+    )
 
     # --- MÉRETARÁNY ---
-    st.sidebar.header("2. Méretarány")
+    st.sidebar.subheader("2. Méretarány")
     mode = st.sidebar.selectbox("Mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció"])
     manual_px_to_m = st.sidebar.slider("Pixel -> Méter", 0.05, 5.0, 0.5, 0.05)
     
@@ -319,28 +325,30 @@ def main():
     uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
     if uploaded:
         image = Image.open(uploaded)
-        st.image(image, caption="Feltöltött kép", width=400)
+        st.image(image, caption="Feltöltött kép", width=600)
         
-        if st.button("Elemzés indítása"):
-            with st.spinner("Számolás..."):
+        if st.button("Elemzés indítása", type="primary"):
+            with st.spinner("Neurális hálózat futtatása..."):
                 try:
                     orig, _, mask_binary, buildings, total_pop = analyze(model, image, px_to_m, threshold)
                     
                     # EREDMÉNYEK
-                    c1, c2 = st.columns(2)
+                    c1, c2, c3 = st.columns(3)
                     c1.metric("Épületek", len(buildings))
-                    c2.metric("Lakosság", int(total_pop))
+                    c2.metric("Becsült Lakosság", int(total_pop))
+                    c3.metric("Modell", "Párizs" if active_weights_path else "Globális")
                     
                     # SZÍNES MASZK
                     overlay = orig.copy()
-                    color = [0, 255, 0] if active_weights_path else [255, 0, 0] # Zöld vagy Piros
+                    color = [0, 255, 0] if active_weights_path else [255, 0, 0] 
                     overlay[mask_binary.astype(bool)] = color
                     res = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
                     
-                    st.image(res, caption=f"Eredmény ({model_option})", use_column_width=True)
+                    st.image(res, caption=f"Szegmentáció Eredménye", use_column_width=True)
                     
+                    # EXPORT
                     df = pd.DataFrame(buildings)
-                    st.download_button("CSV mentése", df.to_csv(), "adatok.csv")
+                    st.download_button("Adatok letöltése (CSV)", df.to_csv(), "adatok.csv")
 
                 except Exception as e:
                     st.error(f"Hiba: {e}")
