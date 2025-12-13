@@ -354,7 +354,7 @@ def main():
                 
                 # SZÍNES MASZK
                 overlay = orig.copy()
-                color = [0, 255, 0] if active_weights_path else [255, 0, 0] 
+                color = [0, 0, 255] if active_weights_path else [255, 0, 0] 
                 overlay[mask_binary.astype(bool)] = color
                 res = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
                 
