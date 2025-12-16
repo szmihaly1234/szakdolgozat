@@ -55,13 +55,13 @@ def meters_per_pixel_web_mercator(latitude_deg, zoom):
     return math.cos(lat_rad) * (2 * math.pi * R) / (256 * (2 ** zoom))
 
 def compute_px_to_m_mode(mode, manual, lat, zoom, known_m, meas_px):
-    if mode == "Auto (GPS)": # Átneveztem, mert már nem csak Google Maps
+    if mode == "Auto (GPS)":
         return meters_per_pixel_web_mercator(lat, zoom) if (lat and zoom) else manual
     elif mode == "Kalibráció (ismert tárgy)":
         return known_m / meas_px if (known_m and meas_px) else manual
     return manual
 
-# --- ÚJ: INGYENES ESRI LETÖLTŐ ---
+# --- ESRI LETÖLTŐ ---
 
 def deg2num(lat_deg, lon_deg, zoom):
     """Koordináták átváltása csempe (tile) indexekre."""
@@ -74,12 +74,15 @@ def deg2num(lat_deg, lon_deg, zoom):
 def download_esri_satellite(location_name, zoom=19):
     """
     Ingyenes Esri World Imagery letöltése.
-    API kulcs NÉLKÜL működik.
     """
-    # 1. Geocoding (Hely megkeresése)
+    # 1. Geocoding (Hely megkeresése) - JAVÍTOTT RÉSZ
     try:
-        geolocator = Nominatim(user_agent="lakossag_app_free")
-        location = geolocator.geocode(location_name)
+        # Egyedi user_agent, hogy ne tiltsanak le, és TIMEOUT beállítása
+        geolocator = Nominatim(user_agent="lakossag_app_free_v2")
+        
+        # ITT A JAVÍTÁS: timeout=10 (10 másodpercet vár, nem 1-et)
+        location = geolocator.geocode(location_name, timeout=10)
+        
     except Exception as e:
         return None, None, f"Geocoding hiba: {str(e)}"
     
@@ -88,28 +91,23 @@ def download_esri_satellite(location_name, zoom=19):
     
     lat, lon = location.latitude, location.longitude
     
-    # 2. Csempék kiszámolása (3x3 rácsot töltünk le, hogy nagy legyen a kép)
+    # 2. Csempék letöltése
     xtile, ytile = deg2num(lat, lon, zoom)
     
-    # Esri szerver URL
     base_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile"
     
-    # Képvászon létrehozása (3 * 256 pixel = 768x768)
+    # 3x3 rács
     full_image = Image.new('RGB', (256*3, 256*3))
-    
-    # Letöltjük a középpontot és a szomszédait
-    headers = {'User-Agent': 'Mozilla/5.0'} # Fontos, hogy böngészőnek álcázzuk magunkat
+    headers = {'User-Agent': 'Mozilla/5.0'} 
     
     try:
         for x_offset in [-1, 0, 1]:
             for y_offset in [-1, 0, 1]:
-                # URL összeállítása
                 url = f"{base_url}/{zoom}/{ytile + y_offset}/{xtile + x_offset}"
                 response = requests.get(url, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     tile_img = Image.open(BytesIO(response.content))
-                    # Beillesztés a nagy képbe
                     paste_x = (x_offset + 1) * 256
                     paste_y = (y_offset + 1) * 256
                     full_image.paste(tile_img, (paste_x, paste_y))
@@ -394,7 +392,6 @@ def main():
             
             if st.button("Elemzés futtatása ezen a képen", type="primary", key="esri_run"):
                 lat, lon, zoom = st.session_state['last_geo']
-                # Esrinél nincs scale=2 trükk, itt a pixel az pixel
                 auto_px_to_m = meters_per_pixel_web_mercator(lat, zoom)
                 
                 run_analysis(model, st.session_state['last_search_img'], auto_px_to_m, threshold, overlap_map[quality_mode], road_ratio)
