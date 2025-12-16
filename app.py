@@ -9,6 +9,9 @@ from tensorflow.keras import backend as K
 from PIL import Image
 import time
 import math
+import requests
+from io import BytesIO
+from geopy.geocoders import Nominatim
 
 # ===============================
 # 1. KONFIGURÁCIÓ
@@ -24,14 +27,14 @@ WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság számláló (Road Filter)", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="Lakosság AI (Full Extra)", page_icon="🛰️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
 SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 
 # ===============================
-# 3. SEGÉDFÜGGVÉNYEK
+# 3. SEGÉDFÜGGVÉNYEK (FILE & GEO)
 # ===============================
 
 def ensure_file_from_drive(file_id, output_path):
@@ -57,6 +60,50 @@ def compute_px_to_m_mode(mode, manual, lat, zoom, known_m, meas_px):
     elif mode == "Kalibráció (ismert tárgy)":
         return known_m / meas_px if (known_m and meas_px) else manual
     return manual
+
+def download_satellite_image(location_name, api_key, zoom=19, size="600x600"):
+    """
+    Helykeresés és Google Maps Static kép letöltése.
+    """
+    # 1. Geocoding
+    try:
+        geolocator = Nominatim(user_agent="lakossag_app_v2")
+        location = geolocator.geocode(location_name)
+    except Exception as e:
+        return None, None, f"Geocoding hiba: {str(e)}"
+    
+    if not location:
+        return None, None, "Nem találom ezt a települést/címet."
+    
+    lat, lon = location.latitude, location.longitude
+    
+    # 2. Kép letöltés
+    if not api_key:
+        return None, (lat, lon, zoom), "Nincs megadva API kulcs! A koordinátákat megtaláltam, de képet nem tudok letölteni."
+
+    base_url = "https://maps.googleapis.com/maps/api/staticmap"
+    params = {
+        "center": f"{lat},{lon}",
+        "zoom": zoom,
+        "size": size,
+        "maptype": "satellite",
+        "scale": 2, # Retina felbontás
+        "key": api_key
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        if response.status_code == 200:
+            image = Image.open(BytesIO(response.content))
+            return image, (lat, lon, zoom), None
+        else:
+            return None, None, f"Google Maps API Hiba: {response.status_code} (Ellenőrizd a kulcsot!)"
+    except Exception as e:
+        return None, None, f"Hálózati hiba: {str(e)}"
+
+# ===============================
+# 4. KÉPFELDOLGOZÁS ÉS MODEL
+# ===============================
 
 def dice_coef(y_true, y_pred):
     smooth = 1.0
@@ -88,85 +135,44 @@ def spacenet_preprocessing(img_array):
     img_float = img.astype(np.float32) / 255.0
     return (img_float - SPACENET_MEAN) / SPACENET_STD
 
-# --- ITT A JAVÍTOTT FÜGGVÉNY AZ UTAK SZŰRÉSÉRE ---
 def segment_buildings_with_road_filter(binary_mask, min_size=50, max_aspect_ratio=5.0):
     """
-    Kiszűri az épületeket, és eldobja azt, ami túl hosszúkás (út).
+    Kontúr alapú keresés + Aspect Ratio szűrés (utak ellen).
     """
-    # 1. Zajszűrés (kicsit agresszívabb)
     kernel = np.ones((3, 3), np.uint8)
     clean = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # 2. Kontúrok keresése (ez pontosabb geometriát ad, mint a connectedComponents)
     contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
     buildings = []
     
     for cnt in contours:
-        # Terület
         area = cv2.contourArea(cnt)
-        if area < min_size:
-            continue
+        if area < min_size: continue
             
-        # 3. Geometriai szűrés (Road Filter)
-        # Egy elforgatott téglalapot illesztünk a foltra
+        # Forgatott befoglaló téglalap az arányokhoz
         rect = cv2.minAreaRect(cnt)
         (x, y), (w, h), angle = rect
         
-        # Kiszámoljuk az oldalarányt (hosszabb / rövidebb)
         shortest = min(w, h)
         longest = max(w, h)
         
-        if shortest == 0: continue # Nullával osztás védelme
+        if shortest == 0: continue 
         aspect_ratio = longest / shortest
         
-        # Ha az arány túl nagy (pl. 5-ször hosszabb, mint széles), akkor az ÚT -> eldobjuk
+        # ROAD FILTER: Ha túl hosszúkás, eldobjuk
         if aspect_ratio > max_aspect_ratio:
             continue
             
-        # Befoglaló téglalap (sima) a megjelenítéshez
+        # Megjelenítéshez sima bbox
         x_bbox, y_bbox, w_bbox, h_bbox = cv2.boundingRect(cnt)
         
-        # Centroid
-        M = cv2.moments(cnt)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-        else:
-            cX, cY = 0, 0
-
         buildings.append({
             'area': area,
             'bbox': (x_bbox, y_bbox, w_bbox, h_bbox),
-            'centroid': (cX, cY),
-            'ratio': aspect_ratio # Debug info
+            'ratio': aspect_ratio
         })
         
     return buildings
-
-# ===============================
-# 4. OSZTÁLYOZÓ LOGIKA
-# ===============================
-
-BUILDING_TYPE_POPULATION = {
-    'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1,
-    'tarsashaz': 45, 'kereskedelmi': 0, 'ipari': 0
-}
-
-def estimate_building_type(area_m2):
-    if area_m2 < 100: return 'kis_lakohaz'
-    elif area_m2 < 300: return 'kozepes_lakohaz'
-    elif area_m2 < 1000: return 'nagy_lakohaz'
-    else: return 'tarsashaz'
-
-def estimate_population(building_type, area):
-    if building_type not in BUILDING_TYPE_POPULATION: return 0
-    base_pop = BUILDING_TYPE_POPULATION[building_type]
-    if building_type in ['kis_lakohaz', 'kozepes_lakohaz', 'nagy_lakohaz']:
-        return base_pop * max(1, area / 100)
-    elif building_type == 'tarsashaz':
-        return base_pop * (max(8, area / 80) / 10)
-    return base_pop
 
 # ===============================
 # 5. MODELL BETÖLTÉS
@@ -195,23 +201,14 @@ def load_model_pro(weights_path=None):
                 info_msg = f"Párizsi modell"
             else:
                 return None, f"HIBA: Fájl nem található", 0
-        
-        weights_sum = 0.0
-        count = 0
-        for layer in reversed(model.layers):
-            if layer.weights:
-                weights = layer.get_weights()
-                weights_sum += np.sum([np.sum(np.abs(w)) for w in weights])
-                count += 1
-                if count >= 5: break
                 
-        return model, info_msg, weights_sum
+        return model, info_msg, 0
 
     except Exception as e:
         return None, f"Kritikus hiba: {str(e)}", 0
 
 # ===============================
-# 6. SLIDING WINDOW
+# 6. SLIDING WINDOW LOGIKA
 # ===============================
 
 def predict_sliding_window(model, full_image, tile_size=320, overlap=0.5):
@@ -245,29 +242,49 @@ def predict_sliding_window(model, full_image, tile_size=320, overlap=0.5):
             count_mask[y:y+tile_size, x:x+tile_size] += 1
             
             step_count += 1
-            if step_count % 5 == 0:
+            if step_count % 10 == 0:
                  progress_bar.progress(min(step_count / total_steps, 1.0))
     
     progress_bar.empty()
     avg_mask = np.divide(full_mask, count_mask, out=np.zeros_like(full_mask), where=count_mask!=0)
-    final_mask = avg_mask[:h, :w]
-    return final_mask
+    return avg_mask[:h, :w]
 
 # ===============================
-# 7. ANALÍZIS (Updated with Road Filter)
+# 7. ANALÍZIS & BECSLÉS
 # ===============================
+
+BUILDING_TYPE_POPULATION = {
+    'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1,
+    'tarsashaz': 45, 'kereskedelmi': 0, 'ipari': 0
+}
+
+def estimate_building_type(area_m2):
+    if area_m2 < 100: return 'kis_lakohaz'
+    elif area_m2 < 300: return 'kozepes_lakohaz'
+    elif area_m2 < 1000: return 'nagy_lakohaz'
+    else: return 'tarsashaz'
+
+def estimate_population(building_type, area):
+    if building_type not in BUILDING_TYPE_POPULATION: return 0
+    base_pop = BUILDING_TYPE_POPULATION[building_type]
+    if building_type in ['kis_lakohaz', 'kozepes_lakohaz', 'nagy_lakohaz']:
+        return base_pop * max(1, area / 100)
+    elif building_type == 'tarsashaz':
+        return base_pop * (max(8, area / 80) / 10)
+    return base_pop
 
 def analyze(model, image, px_to_m, threshold, overlap, road_sensitivity):
     image_enhanced = enhance_with_clahe(image)
     orig_np = np.array(image_enhanced.convert("RGB"))
     
+    # 1. Sliding Window Predikció
     raw_mask = predict_sliding_window(model, orig_np, tile_size=320, overlap=overlap)
     binary_mask = (raw_mask > threshold).astype(np.uint8)
 
-    # ITT HASZNÁLJUK AZ ÚJ SZŰRŐT
-    # road_sensitivity: minél kisebb, annál szigorúbb (pl. 3.0 mindent kiszűr ami kicsit is hosszú)
+    # 2. Szegmentálás + Road Filter
     buildings = segment_buildings_with_road_filter(binary_mask, min_size=50, max_aspect_ratio=road_sensitivity)
 
+    # 3. Adatok összesítése
     results = []
     total_pop = 0
     for i, b in enumerate(buildings):
@@ -287,132 +304,147 @@ def clear_model_cache():
     st.cache_resource.clear()
 
 def main():
-    st.title("Lakosságszámláló - Road Filter 🛣️")
+    st.title("Műholdkép Elemző AI 🛰️")
 
+    # --- SIDEBAR ---
     st.sidebar.title("⚙️ Beállítások")
     
-    # 1. Modell
-    st.sidebar.subheader("1. Modell Verzió")
-    model_option = st.sidebar.radio(
-        "Tudásbázis:",
-        ("Globális (Eredeti)", "Európa/Párizs (Finomhangolt)"),
-        on_change=clear_model_cache
-    )
+    # Modell
+    st.sidebar.subheader("1. AI Modell")
+    model_option = st.sidebar.radio("Verzió:", ("Globális", "Párizs/EU"), on_change=clear_model_cache)
+    active_weights_path = WEIGHTS_PATH if model_option == "Párizs/EU" else None
     
-    active_weights_path = None
-    if model_option == "Európa/Párizs (Finomhangolt)":
-        with st.spinner("Súlyok ellenőrzése..."):
-            ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
-        active_weights_path = WEIGHTS_PATH
+    if active_weights_path:
+        ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
 
     with st.spinner("Modell betöltése..."):
-        model, status_msg, check_sum = load_model_pro(active_weights_path)
+        model, status_msg, _ = load_model_pro(active_weights_path)
     
-    if model is None:
+    if not model:
         st.error(status_msg)
         st.stop()
-    st.sidebar.info(f"Aktív: {status_msg}")
+    st.sidebar.success(f"Aktív: {status_msg}")
 
-    # 2. Méretarány
-    st.sidebar.subheader("2. Méretarány")
+    # Méretarány
+    st.sidebar.subheader("2. Méretarány (Fontos!)")
     mode = st.sidebar.selectbox("Mód", ["Kézi (slider)", "Auto (Google Maps)", "Kalibráció"])
-    manual_px_to_m = st.sidebar.slider("Pixel -> Méter", 0.05, 5.0, 0.5, 0.05)
+    manual_px_to_m = st.sidebar.slider("Pixel -> Méter", 0.05, 2.0, 0.3, 0.05)
     
-    lat, zoom, known_m, meas_px = None, None, None, None
-    if mode == "Auto (Google Maps)":
-        lat = st.sidebar.number_input("Szélesség", value=47.4979)
-        zoom = st.sidebar.number_input("Zoom", value=18)
-    if mode == "Kalibráció":
-        known_m = st.sidebar.number_input("Távolság (m)", value=100.0)
-        meas_px = st.sidebar.number_input("Pixel (px)", value=200.0)
-
-    px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, lat, zoom, known_m, meas_px)
-    st.sidebar.caption(f"Aktív MPP: {px_to_m:.4f}")
-    
-    # 3. Finomhangolás
+    # Finomhangolás
     st.sidebar.subheader("3. Finomhangolás")
-    threshold = st.sidebar.slider("Threshold (Érzékenység)", 0.0, 1.0, 0.5)
+    quality_mode = st.sidebar.select_slider("Minőség (Overlap)", options=["Gyors", "Normál", "Magas", "Ultra"], value="Magas")
+    overlap_map = {"Gyors": 0.1, "Normál": 0.25, "Magas": 0.5, "Ultra": 0.75}
     
-    quality_mode = st.sidebar.select_slider(
-        "Elemzés minősége (Átfedés)",
-        options=["Gyors (10%)", "Normál (25%)", "Magas (50%)", "Ultra (75%)"],
-        value="Magas (50%)"
-    )
-    overlap_map = {"Gyors (10%)": 0.10, "Normál (25%)": 0.25, "Magas (50%)": 0.50, "Ultra (75%)": 0.75}
-    selected_overlap = overlap_map[quality_mode]
-
-    # ÚJ: Road Filter Slider
-    st.sidebar.write("---")
+    threshold = st.sidebar.slider("Küszöb (Threshold)", 0.2, 0.9, 0.5)
+    
     st.sidebar.subheader("🚫 Út szűrés (Road Filter)")
-    road_ratio = st.sidebar.slider(
-        "Max Hosszúság/Szélesség arány", 
-        min_value=2.0, max_value=10.0, value=5.0, step=0.5,
-        help="Ha egy alakzat 5x hosszabb mint amilyen széles, az út, nem ház."
-    )
+    road_ratio = st.sidebar.slider("Max Hossz/Szél arány", 2.0, 10.0, 5.0, help="Efelett útnak vesszük")
 
-    # --- FŐ RÉSZ ---
-    st.write("---")
-    uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
-    if uploaded:
-        image = Image.open(uploaded)
-        st.image(image, caption="Feltöltött kép", width=600)
-        
-        if st.button(f"Elemzés indítása", type="primary"):
-            progress_text = st.empty()
-            progress_text.text("Neurális hálózat futtatása...")
+    # --- FÜLEK ---
+    tab1, tab2 = st.tabs(["📁 Fájl feltöltés", "🗺️ Helykeresés (Béta)"])
+
+    # --- 1. TAB: FÁJL ---
+    with tab1:
+        uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
+        if uploaded:
+            image = Image.open(uploaded)
+            st.image(image, caption="Feltöltött kép", width=600)
             
-            try:
-                start_time = time.time()
-                
-                # Futtatás
-                orig, _, mask_binary, buildings, total_pop = analyze(
-                    model, image, px_to_m, threshold, 
-                    overlap=selected_overlap, 
-                    road_sensitivity=road_ratio # Itt adjuk át az új paramétert
-                )
-                
-                elapsed = time.time() - start_time
-                progress_text.text(f"Kész! (Futási idő: {elapsed:.1f}s)")
-                
-                # EREDMÉNYEK
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Épületek", len(buildings))
-                c2.metric("Becsült Lakosság", int(total_pop))
-                c3.metric("Kiszűrt utak", "Aktív" if road_ratio < 8.0 else "Inaktív")
-                
-                # SZÍNES MASZK RAJZOLÁS (Csak a validált épületeket rajzoljuk vissza)
-                # Üres maszk
-                final_vis_mask = np.zeros(mask_binary.shape, dtype=np.uint8)
-                for b in buildings:
-                    x, y, w, h = b['bbox']
-                    # Mivel nincs meg a pontos kontúr itt a loopban egyszerűen, 
-                    # a bboxot rajzoljuk vagy a maszkból vágjuk ki. 
-                    # Elegánsabb: a maszk binary eredeti, de csak a bbox területét hagyjuk meg?
-                    # Egyszerűbb vizualizáció:
-                    cv2.rectangle(final_vis_mask, (x, y), (x+w, y+h), 255, -1)
-                
-                # Overlay
-                overlay = orig.copy()
-                overlay[final_vis_mask == 255] = [0, 255, 0] # Zöld épületek
-                
-                # Az eredeti (zajos) maszkot pirossal jelezzük halványan, hogy lássuk mit szűrtünk ki
-                diff_mask = cv2.bitwise_xor(mask_binary, final_vis_mask)
-                overlay[diff_mask == 1] = [255, 0, 0] # Piros (amit kiszűrtünk, pl utak)
+            # Paraméterek bekérése manuális módban
+            lat, zoom, known_m, meas_px = None, None, None, None
+            if mode == "Auto (Google Maps)":
+                st.info("Kérlek add meg a koordinátákat a pontos méréshez:")
+                c1, c2 = st.columns(2)
+                lat = c1.number_input("Szélesség (Lat)", value=47.4979)
+                zoom = c2.number_input("Zoom Level", value=19)
+            
+            px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, lat, zoom, known_m, meas_px)
 
-                res = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
-                
-                st.image(res, caption="Zöld: Épület | Piros: Kiszűrt zaj/út", use_column_width=True)
-                
-                df = pd.DataFrame(buildings)
-                if not df.empty:
-                    st.download_button("Adatok letöltése (CSV)", df.to_csv(), "adatok.csv")
-                else:
-                    st.warning("Nem találtam épületet.")
+            if st.button("Elemzés indítása (Fájl)", type="primary"):
+                run_analysis(model, image, px_to_m, threshold, overlap_map[quality_mode], road_ratio)
 
-            except Exception as e:
-                st.error(f"Hiba: {e}")
-                import traceback
-                st.text(traceback.format_exc())
+    # --- 2. TAB: HELYKERESÉS ---
+    with tab2:
+        st.subheader("Írj be egy címet, és leszedem a képet!")
+        api_key = st.text_input("Google Maps Static API Kulcs", type="password")
+        
+        search_query = st.text_input("Település / Cím", placeholder="pl. Eger, Dobó tér")
+        
+        if st.button("Keresés"):
+            if not search_query:
+                st.warning("Írj be valamit!")
+            else:
+                with st.spinner("Keresés és letöltés..."):
+                    img, geo_data, err = download_satellite_image(search_query, api_key)
+                
+                if err:
+                    st.error(err)
+                    if geo_data: st.info(f"Koordináták: {geo_data}")
+                
+                if img:
+                    st.session_state['last_search_img'] = img
+                    st.session_state['last_geo'] = geo_data
+                    st.success(f"Siker! Koordináták: {geo_data[0]:.4f}, {geo_data[1]:.4f}")
+        
+        # Ha van keresett kép, mutassuk és elemezzük
+        if 'last_search_img' in st.session_state:
+            st.image(st.session_state['last_search_img'], caption="Letöltött műholdkép", width=600)
+            
+            if st.button("Elemzés futtatása ezen a képen", type="primary"):
+                # Automata skálázás (Zoom 19 + Scale 2 miatt a felbontás feleződik a matekban)
+                lat, lon, zoom = st.session_state['last_geo']
+                # Scale=2 a Google API-nál 2x pixelsűrűséget jelent, tehát 1 pixel fele akkora távolság
+                auto_px_to_m = meters_per_pixel_web_mercator(lat, zoom) / 2 
+                
+                run_analysis(model, st.session_state['last_search_img'], auto_px_to_m, threshold, overlap_map[quality_mode], road_ratio)
+
+# ===============================
+# KÖZÖS ELEMZŐ RUTIN
+# ===============================
+def run_analysis(model, image, px_to_m, threshold, overlap, road_ratio):
+    progress_text = st.empty()
+    progress_text.info("Neurális hálózat futtatása...")
+    
+    start = time.time()
+    
+    try:
+        orig, _, mask_binary, buildings, total_pop = analyze(
+            model, image, px_to_m, threshold, overlap, road_ratio
+        )
+        
+        elapsed = time.time() - start
+        progress_text.success(f"Kész! ({elapsed:.1f}s)")
+        
+        # Eredmények
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Talált Épületek", len(buildings))
+        c2.metric("Becsült Lakosság", int(total_pop))
+        c3.metric("Pixel méret", f"{px_to_m:.3f} m")
+
+        # Vizualizáció
+        vis_mask = np.zeros(mask_binary.shape, dtype=np.uint8)
+        for b in buildings:
+            x, y, w, h = b['bbox']
+            cv2.rectangle(vis_mask, (x, y), (x+w, y+h), 255, -1)
+            
+        overlay = orig.copy()
+        overlay[vis_mask == 255] = [0, 255, 0] # Zöld épületek
+        diff = cv2.bitwise_xor(mask_binary, vis_mask)
+        overlay[diff == 1] = [255, 0, 0] # Piros (kiszűrt utak/zaj)
+        
+        res = cv2.addWeighted(orig, 0.6, overlay, 0.4, 0)
+        st.image(res, caption="Eredmény (Zöld: Ház, Piros: Szűrt)", use_column_width=True)
+        
+        df = pd.DataFrame(buildings)
+        if not df.empty:
+            st.download_button("CSV Letöltése", df.to_csv(), "adatok.csv")
+        else:
+            st.warning("Nem találtam épületet a szűrés után.")
+            
+    except Exception as e:
+        st.error(f"Hiba történt: {e}")
+        import traceback
+        st.text(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
