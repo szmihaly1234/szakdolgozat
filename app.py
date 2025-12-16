@@ -11,7 +11,8 @@ import time
 import math
 import requests
 from io import BytesIO
-from geopy.geocoders import Nominatim
+# Itt importáljuk az új, stabilabb geocodert (ArcGIS)
+from geopy.geocoders import Nominatim, ArcGIS
 
 # ===============================
 # 1. KONFIGURÁCIÓ
@@ -27,7 +28,7 @@ WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság AI (Ingyenes Verzió)", page_icon="🛰️", layout="wide")
+st.set_page_config(page_title="Lakosság AI (Stable Version)", page_icon="🛰️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
@@ -61,7 +62,7 @@ def compute_px_to_m_mode(mode, manual, lat, zoom, known_m, meas_px):
         return known_m / meas_px if (known_m and meas_px) else manual
     return manual
 
-# --- ESRI LETÖLTŐ ---
+# --- ESRI LETÖLTŐ (JAVÍTOTT GEOCODING) ---
 
 def deg2num(lat_deg, lon_deg, zoom):
     """Koordináták átváltása csempe (tile) indexekre."""
@@ -71,23 +72,43 @@ def deg2num(lat_deg, lon_deg, zoom):
     ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
     return (xtile, ytile)
 
+def get_location_coordinates(location_name):
+    """
+    Megpróbálja megkeresni a címet.
+    Első körben az ArcGIS-t használja (stabil), ha nem megy, a Nominatim-ot.
+    """
+    try:
+        # 1. Próbálkozás: ArcGIS (Ez sokkal stabilabb)
+        geolocator = ArcGIS(user_agent="lakossag_app_arcgis")
+        location = geolocator.geocode(location_name, timeout=10)
+        if location:
+            return location
+    except Exception as e:
+        print(f"ArcGIS hiba: {e}")
+
+    try:
+        # 2. Próbálkozás: Nominatim (Fallback)
+        geolocator = Nominatim(user_agent="lakossag_app_backup_v3")
+        location = geolocator.geocode(location_name, timeout=15)
+        if location:
+            return location
+    except Exception as e:
+        print(f"Nominatim hiba: {e}")
+        
+    return None
+
 def download_esri_satellite(location_name, zoom=19):
     """
     Ingyenes Esri World Imagery letöltése.
     """
-    # 1. Geocoding (Hely megkeresése) - JAVÍTOTT RÉSZ
+    # 1. Geocoding (Hely megkeresése) - ÚJ ROBUSZTUS FÜGGVÉNY
     try:
-        # Egyedi user_agent, hogy ne tiltsanak le, és TIMEOUT beállítása
-        geolocator = Nominatim(user_agent="lakossag_app_free_v2")
-        
-        # ITT A JAVÍTÁS: timeout=10 (10 másodpercet vár, nem 1-et)
-        location = geolocator.geocode(location_name, timeout=10)
-        
+        location = get_location_coordinates(location_name)
     except Exception as e:
         return None, None, f"Geocoding hiba: {str(e)}"
     
     if not location:
-        return None, None, "Nem találom ezt a települést/címet."
+        return None, None, "Nem találom ezt a települést/címet. Próbáld pontosabban (pl. Budapest, Hungary)!"
     
     lat, lon = location.latitude, location.longitude
     
