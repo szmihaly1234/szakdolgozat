@@ -11,7 +11,6 @@ import time
 import math
 import requests
 from io import BytesIO
-# Itt importáljuk az új, stabilabb geocodert (ArcGIS)
 from geopy.geocoders import Nominatim, ArcGIS
 
 # ===============================
@@ -28,14 +27,14 @@ WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
 # 2. ALAP BEÁLLÍTÁSOK
 # ===============================
 
-st.set_page_config(page_title="Lakosság AI (Stable Version)", page_icon="🛰️", layout="wide")
+st.set_page_config(page_title="Lakosság AI (Auto-Scale)", page_icon="🛰️", layout="wide")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 SPACENET_MEAN = np.array([0.339, 0.324, 0.285], dtype=np.float32)
 SPACENET_STD  = np.array([0.139, 0.125, 0.122], dtype=np.float32)
 
 # ===============================
-# 3. SEGÉDFÜGGVÉNYEK (FILE & GEO)
+# 3. SEGÉDFÜGGVÉNYEK
 # ===============================
 
 def ensure_file_from_drive(file_id, output_path):
@@ -51,21 +50,17 @@ if not os.path.exists(MODEL_PATH):
     ensure_file_from_drive(MODEL_FILE_ID, MODEL_PATH)
 
 def meters_per_pixel_web_mercator(latitude_deg, zoom):
-    R = 6378137.0
+    """
+    Ez a kulcsfüggvény! Kiszámolja a pontos méretet a szélességi fok alapján.
+    """
+    R = 6378137.0 # Föld sugara
     lat_rad = math.radians(latitude_deg)
+    # A képlet: (C * cos(lat)) / 2^zoom
     return math.cos(lat_rad) * (2 * math.pi * R) / (256 * (2 ** zoom))
 
-def compute_px_to_m_mode(mode, manual, lat, zoom, known_m, meas_px):
-    if mode == "Auto (GPS)":
-        return meters_per_pixel_web_mercator(lat, zoom) if (lat and zoom) else manual
-    elif mode == "Kalibráció (ismert tárgy)":
-        return known_m / meas_px if (known_m and meas_px) else manual
-    return manual
-
-# --- ESRI LETÖLTŐ (JAVÍTOTT GEOCODING) ---
+# --- GEOCODING ÉS LETÖLTÉS ---
 
 def deg2num(lat_deg, lon_deg, zoom):
-    """Koordináták átváltása csempe (tile) indexekre."""
     lat_rad = math.radians(lat_deg)
     n = 2.0 ** zoom
     xtile = int((lon_deg + 180.0) / 360.0 * n)
@@ -73,51 +68,31 @@ def deg2num(lat_deg, lon_deg, zoom):
     return (xtile, ytile)
 
 def get_location_coordinates(location_name):
-    """
-    Megpróbálja megkeresni a címet.
-    Első körben az ArcGIS-t használja (stabil), ha nem megy, a Nominatim-ot.
-    """
     try:
-        # 1. Próbálkozás: ArcGIS (Ez sokkal stabilabb)
         geolocator = ArcGIS(user_agent="lakossag_app_arcgis")
         location = geolocator.geocode(location_name, timeout=10)
-        if location:
-            return location
-    except Exception as e:
-        print(f"ArcGIS hiba: {e}")
-
+        if location: return location
+    except: pass
     try:
-        # 2. Próbálkozás: Nominatim (Fallback)
-        geolocator = Nominatim(user_agent="lakossag_app_backup_v3")
+        geolocator = Nominatim(user_agent="lakossag_app_backup_v4")
         location = geolocator.geocode(location_name, timeout=15)
-        if location:
-            return location
-    except Exception as e:
-        print(f"Nominatim hiba: {e}")
-        
+        if location: return location
+    except: pass
     return None
 
 def download_esri_satellite(location_name, zoom=19):
-    """
-    Ingyenes Esri World Imagery letöltése.
-    """
-    # 1. Geocoding (Hely megkeresése) - ÚJ ROBUSZTUS FÜGGVÉNY
     try:
         location = get_location_coordinates(location_name)
     except Exception as e:
         return None, None, f"Geocoding hiba: {str(e)}"
     
     if not location:
-        return None, None, "Nem találom ezt a települést/címet. Próbáld pontosabban (pl. Budapest, Hungary)!"
+        return None, None, "Nem találom a települést."
     
     lat, lon = location.latitude, location.longitude
-    
-    # 2. Csempék letöltése
     xtile, ytile = deg2num(lat, lon, zoom)
     
     base_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile"
-    
-    # 3x3 rács
     full_image = Image.new('RGB', (256*3, 256*3))
     headers = {'User-Agent': 'Mozilla/5.0'} 
     
@@ -126,22 +101,16 @@ def download_esri_satellite(location_name, zoom=19):
             for y_offset in [-1, 0, 1]:
                 url = f"{base_url}/{zoom}/{ytile + y_offset}/{xtile + x_offset}"
                 response = requests.get(url, headers=headers, timeout=10)
-                
                 if response.status_code == 200:
                     tile_img = Image.open(BytesIO(response.content))
-                    paste_x = (x_offset + 1) * 256
-                    paste_y = (y_offset + 1) * 256
-                    full_image.paste(tile_img, (paste_x, paste_y))
-                else:
-                    print(f"Hiba a csempénél: {url}")
+                    full_image.paste(tile_img, ((x_offset+1)*256, (y_offset+1)*256))
                     
         return full_image, (lat, lon, zoom), None
-
     except Exception as e:
         return None, None, f"Hálózati hiba: {str(e)}"
 
 # ===============================
-# 4. KÉPFELDOLGOZÁS ÉS MODEL
+# 4. KÉPFELDOLGOZÁS
 # ===============================
 
 def dice_coef(y_true, y_pred):
@@ -164,48 +133,33 @@ def enhance_with_clahe(image):
     return Image.fromarray(cv2.cvtColor(merged, cv2.COLOR_LAB2RGB))
 
 def spacenet_preprocessing(img_array):
-    if img_array.ndim == 2: 
-        img = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
-    elif img_array.ndim == 3 and img_array.shape[2] == 4: 
-        img = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-    else: 
-        img = img_array
-    
+    if img_array.ndim == 2: img = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    elif img_array.ndim == 3 and img_array.shape[2] == 4: img = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+    else: img = img_array
     img_float = img.astype(np.float32) / 255.0
     return (img_float - SPACENET_MEAN) / SPACENET_STD
 
 def segment_buildings_with_road_filter(binary_mask, min_size=50, max_aspect_ratio=5.0):
     kernel = np.ones((3, 3), np.uint8)
     clean = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    
     contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     buildings = []
-    
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_size: continue
-            
         rect = cv2.minAreaRect(cnt)
         (x, y), (w, h), angle = rect
         shortest = min(w, h)
         longest = max(w, h)
         if shortest == 0: continue 
         aspect_ratio = longest / shortest
-        
-        if aspect_ratio > max_aspect_ratio:
-            continue
-            
+        if aspect_ratio > max_aspect_ratio: continue
         x_bbox, y_bbox, w_bbox, h_bbox = cv2.boundingRect(cnt)
-        buildings.append({
-            'area': area,
-            'bbox': (x_bbox, y_bbox, w_bbox, h_bbox),
-            'ratio': aspect_ratio
-        })
-        
+        buildings.append({'area': area, 'bbox': (x_bbox, y_bbox, w_bbox, h_bbox), 'ratio': aspect_ratio})
     return buildings
 
 # ===============================
-# 5. MODELL BETÖLTÉS
+# 5. MODELL LOAD
 # ===============================
 
 @st.cache_resource(show_spinner=False)
@@ -223,22 +177,17 @@ def load_model_pro(weights_path=None):
             custom_objects={'dice_loss': dice_loss, 'dice_coef': dice_coef, 'DepthwiseConv2D': FixedDepthwiseConv2D},
             compile=False
         )
-        
         info_msg = "Globális modell"
         if weights_path:
             if os.path.exists(weights_path):
                 model.load_weights(weights_path)
                 info_msg = f"Párizsi modell"
-            else:
-                return None, f"HIBA: Fájl nem található", 0
-                
         return model, info_msg, 0
-
     except Exception as e:
         return None, f"Kritikus hiba: {str(e)}", 0
 
 # ===============================
-# 6. SLIDING WINDOW LOGIKA
+# 6. SLIDING WINDOW
 # ===============================
 
 def predict_sliding_window(model, full_image, tile_size=320, overlap=0.5):
@@ -264,13 +213,10 @@ def predict_sliding_window(model, full_image, tile_size=320, overlap=0.5):
             tile = padded_image[y:y+tile_size, x:x+tile_size]
             pre = spacenet_preprocessing(tile)
             input_tensor = np.expand_dims(pre, axis=0)
-            
             pred = model.predict(input_tensor, verbose=0)
             mask = pred[0, :, :, 0] 
-            
             full_mask[y:y+tile_size, x:x+tile_size] += mask
             count_mask[y:y+tile_size, x:x+tile_size] += 1
-            
             step_count += 1
             if step_count % 10 == 0:
                  progress_bar.progress(min(step_count / total_steps, 1.0))
@@ -280,13 +226,10 @@ def predict_sliding_window(model, full_image, tile_size=320, overlap=0.5):
     return avg_mask[:h, :w]
 
 # ===============================
-# 7. ANALÍZIS & BECSLÉS
+# 7. LOGIKA
 # ===============================
 
-BUILDING_TYPE_POPULATION = {
-    'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1,
-    'tarsashaz': 45, 'kereskedelmi': 0, 'ipari': 0
-}
+BUILDING_TYPE_POPULATION = {'kis_lakohaz': 2.9, 'kozepes_lakohaz': 3.2, 'nagy_lakohaz': 4.1, 'tarsashaz': 45}
 
 def estimate_building_type(area_m2):
     if area_m2 < 100: return 'kis_lakohaz'
@@ -306,12 +249,10 @@ def estimate_population(building_type, area):
 def analyze(model, image, px_to_m, threshold, overlap, road_sensitivity):
     image_enhanced = enhance_with_clahe(image)
     orig_np = np.array(image_enhanced.convert("RGB"))
-    
     raw_mask = predict_sliding_window(model, orig_np, tile_size=320, overlap=overlap)
     binary_mask = (raw_mask > threshold).astype(np.uint8)
-
     buildings = segment_buildings_with_road_filter(binary_mask, min_size=50, max_aspect_ratio=road_sensitivity)
-
+    
     results = []
     total_pop = 0
     for i, b in enumerate(buildings):
@@ -320,18 +261,17 @@ def analyze(model, image, px_to_m, threshold, overlap, road_sensitivity):
         pop = estimate_population(btype, area_m2)
         total_pop += pop
         results.append({'id': i+1, 'type': btype, 'area_m2': round(area_m2,1), 'population': pop, 'bbox': b['bbox']})
-
     return orig_np, raw_mask, binary_mask, results, total_pop
 
 # ===============================
-# 8. MAIN UI
+# 8. MAIN UI (Javított)
 # ===============================
 
 def clear_model_cache():
     st.cache_resource.clear()
 
 def main():
-    st.title("Lakosság AI (Ingyenes 🆓)")
+    st.title("Lakosság AI (Auto-Scale 🛰️)")
 
     # --- SIDEBAR ---
     st.sidebar.title("⚙️ Beállítások")
@@ -345,51 +285,38 @@ def main():
 
     with st.spinner("Modell betöltése..."):
         model, status_msg, _ = load_model_pro(active_weights_path)
-    
-    if not model:
-        st.error(status_msg)
-        st.stop()
+    if not model: st.stop()
     st.sidebar.success(f"Aktív: {status_msg}")
 
-    st.sidebar.subheader("2. Méretarány")
-    mode = st.sidebar.selectbox("Mód", ["Kézi (slider)", "Auto (GPS)", "Kalibráció"])
+    # ÁTNEVEZVE: Ez csak a fájl feltöltéshez kell
+    st.sidebar.subheader("2. Manuális Kalibráció")
+    st.sidebar.caption("Csak 'Fájl feltöltés' módhoz! AI keresésnél automatikus.")
     manual_px_to_m = st.sidebar.slider("Pixel -> Méter", 0.05, 2.0, 0.3, 0.05)
     
     st.sidebar.subheader("3. Finomhangolás")
     quality_mode = st.sidebar.select_slider("Minőség (Overlap)", options=["Gyors", "Normál", "Magas", "Ultra"], value="Magas")
     overlap_map = {"Gyors": 0.1, "Normál": 0.25, "Magas": 0.5, "Ultra": 0.75}
-    
     threshold = st.sidebar.slider("Küszöb (Threshold)", 0.2, 0.9, 0.5)
-    
-    st.sidebar.subheader("🚫 Út szűrés (Road Filter)")
-    road_ratio = st.sidebar.slider("Max Hossz/Szél arány", 2.0, 10.0, 5.0)
+    road_ratio = st.sidebar.slider("Út szűrés (Hossz/Szél)", 2.0, 10.0, 5.0)
 
     # --- FÜLEK ---
-    tab1, tab2 = st.tabs(["📁 Fájl feltöltés", "🌍 Ingyenes Műholdkép (Esri)"])
+    tab1, tab2 = st.tabs(["📁 Fájl feltöltés (Manuális)", "🌍 Helykeresés (Automata)"])
 
     # --- 1. TAB: FÁJL ---
     with tab1:
+        st.info("Itt használjuk a bal oldali csúszkát a méretarányhoz.")
         uploaded = st.file_uploader("Kép feltöltése", type=["jpg", "png"])
         if uploaded:
             image = Image.open(uploaded)
             st.image(image, caption="Feltöltött kép", width=600)
-            
-            lat, zoom, known_m, meas_px = None, None, None, None
-            if mode == "Auto (GPS)":
-                st.info("Feltöltött képnél add meg a koordinátákat a méréshez:")
-                c1, c2 = st.columns(2)
-                lat = c1.number_input("Szélesség (Lat)", value=47.4979)
-                zoom = c2.number_input("Zoom Level (kb)", value=19)
-            
-            px_to_m = compute_px_to_m_mode(mode, manual_px_to_m, lat, zoom, known_m, meas_px)
+            if st.button("Elemzés (Fájl)", type="primary"):
+                # Itt a kézi csúszkát használjuk
+                run_analysis(model, image, manual_px_to_m, threshold, overlap_map[quality_mode], road_ratio)
 
-            if st.button("Elemzés indítása (Fájl)", type="primary"):
-                run_analysis(model, image, px_to_m, threshold, overlap_map[quality_mode], road_ratio)
-
-    # --- 2. TAB: HELYKERESÉS (INGYENES) ---
+    # --- 2. TAB: HELYKERESÉS (AUTOMATA) ---
     with tab2:
-        st.subheader("Keress bármelyik településre (Ingyenes!)")
-        st.caption("Esri World Imagery műholdképeket használunk. Nem kell API kulcs.")
+        st.subheader("Keress bármelyik településre (ArcGIS)")
+        st.success("✅ A méretarány itt AUTOMATIKUS. Nem kell állítanod semmit.")
         
         search_query = st.text_input("Település / Cím", placeholder="pl. Pécs, Széchenyi tér")
         
@@ -397,23 +324,27 @@ def main():
             if not search_query:
                 st.warning("Írj be valamit!")
             else:
-                with st.spinner(f"Kapcsolódás az Esri műholdakhoz ({search_query})..."):
+                with st.spinner(f"Keresés: {search_query}..."):
                     img, geo_data, err = download_esri_satellite(search_query, zoom=19)
                 
                 if err:
                     st.error(err)
-                
                 if img:
                     st.session_state['last_search_img'] = img
                     st.session_state['last_geo'] = geo_data
-                    st.success(f"Siker! Megtaláltam.")
+                    st.success(f"Megtaláltam!")
         
         if 'last_search_img' in st.session_state:
-            st.image(st.session_state['last_search_img'], caption="Letöltött műholdkép (Esri)", width=600)
+            st.image(st.session_state['last_search_img'], caption="Műholdkép", width=600)
             
-            if st.button("Elemzés futtatása ezen a képen", type="primary", key="esri_run"):
+            if st.button("Elemzés futtatása (Automata Skálázás)", type="primary", key="esri_run"):
                 lat, lon, zoom = st.session_state['last_geo']
+                
+                # --- ITT A LÉNYEG ---
+                # Nem a csúszkát nézzük, hanem kiszámoljuk matematikailag
                 auto_px_to_m = meters_per_pixel_web_mercator(lat, zoom)
+                
+                st.write(f"📐 Számított pixelméret ezen a szélességi fokon: **{auto_px_to_m:.4f} m/px**")
                 
                 run_analysis(model, st.session_state['last_search_img'], auto_px_to_m, threshold, overlap_map[quality_mode], road_ratio)
 
