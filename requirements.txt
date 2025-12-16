@@ -7,4 +7,5 @@ pandas
 numpy
 scikit-learn
 gdown
-geopy requests
+geopy
+requests
