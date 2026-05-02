@@ -85,18 +85,24 @@ def load_pytorch_model():
     return model, device
 
 # ==========================================
-# 3. NÉPESSÉGBECSLÉSI LOGIKA
+# 3. NÉPESSÉGBECSLÉSI ÉS MASZK TISZTÍTÓ LOGIKA
 # ==========================================
-def analyze_buildings(mask, lat, zoom):
-    # Egy pixel mérete méterben, a Föld görbületének figyelembevételével
+def analyze_and_clean_mask(mask, lat, zoom):
     m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
+    clean_mask = np.zeros_like(mask)
     buildings = []
+    
     for cnt in contours:
         area_px = cv2.contourArea(cnt)
-        if area_px < 30:  # Zajos, apró pixelek szűrése
+        
+        # Szigorú zajszűrés: ami 50 pixel alatti, az kuka
+        if area_px < 50:  
             continue 
+            
+        # Ha átment a teszten, fizikailag is rárajzoljuk a tiszta maszkra
+        cv2.drawContours(clean_mask, [cnt], -1, 1, thickness=cv2.FILLED)
         
         area_m2 = area_px * (m_per_px**2)
         
@@ -116,7 +122,7 @@ def analyze_buildings(mask, lat, zoom):
             'Becsült lakosság': round(pop, 1)
         })
         
-    return buildings
+    return clean_mask, buildings
 
 # ==========================================
 # 4. STREAMLIT FELHASZNÁLÓI FELÜLET (UI)
@@ -126,7 +132,8 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 # Oldalsáv
 st.sidebar.header("⚙️ Beállítások")
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.20, 0.05, help="Húzd feljebb, ha túl sok a zöld, húzd lejjebb, ha foghíjasak a házak.")
+# A küszöb mostantól a Nyers modell valószínűségeken dolgozik. Magasabbra lőttem be.
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.50, 0.99, 0.85, 0.01, help="Nyers Sigmoid. 0.85 az alap.")
 zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
 
 # Kereső
@@ -134,8 +141,6 @@ query = st.text_input("Helyszín keresése (település, utca):", "Budapest, Hő
 
 if st.button("Elemzés Futtatása", type="primary"):
     with st.spinner("Műholdkép elemzése folyamatban..."):
-        
-        # 1. Helyszín koordinátáinak lekérése
         geolocator = ArcGIS()
         loc = geolocator.geocode(query)
         
@@ -145,96 +150,59 @@ if st.button("Elemzés Futtatása", type="primary"):
             xtile = int((lon + 180.0) / 360.0 * n)
             ytile = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
             
-            # 2. Kép letöltése az ESRI ArcGIS szerveréről
             url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom_level}/{ytile}/{xtile}"
             response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
             
             if response.status_code == 200:
-                # Eredeti RGB kép betöltése
                 img = Image.open(BytesIO(response.content)).convert("RGB").resize((512, 512))
                 img_np = np.array(img)
 
-                # ==========================================
-                # PREPROCESSZÁLÁS (OpenCV BGR konverzió)
-                # ==========================================
+                # OpenCV BGR formátum konverzió (Albumentations kompatibilitás)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
                 img_input = img_bgr.astype(np.float32)
 
                 model, device = load_pytorch_model()
                 input_t = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).to(device=device)
 
-                # ==========================================
-                # MODELL FUTTATÁSA ÉS AGRESSZÍV KONTRAST
-                # ==========================================
                 with torch.no_grad():
                     output = model(input_t)
                     
-                    # 1. Alap valószínűségek generálása
+                    # 1. Nyers valószínűség generálása (nincs Auto-Kontraszt!)
                     prob = torch.sigmoid(output).cpu().numpy()[0, 0]
                     
-                    prob_min = prob.min()
-                    prob_max = prob.max()
+                    st.info(f"📊 Nyers Modell Képesség: A legbiztosabb aszfalt/háttér {prob.min()*100:.1f}%, a legbiztosabb épület {prob.max()*100:.1f}%.")
                     
-                    # 2. AGRESSZÍV NORMALIZÁLÁS ÉS KONTRAST NÖVELÉS
-                    prob_shifted = prob - prob_min
-                    range_val = prob_max - prob_min
-                    
-                    if range_val > 0:
-                        prob_normalized = prob_shifted / range_val
-                    else:
-                        prob_normalized = prob_shifted
-                        
-                    # Gamma korrekció: A bizonytalan zajt elnyomja, a határozott csúcsokat meghagyja
-                    prob_gamma = np.power(prob_normalized, 3.0) 
-                    
-                    # 3. Alap küszöbölés
-                    mask = (prob_gamma > threshold).astype(np.uint8)
-                    
-                    # Heatmap generálása vizualizációhoz
-                    heatmap_img = (prob_gamma * 255).astype(np.uint8)
-                    heatmap_colored = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
+                    # 2. Közvetlen küszöbölés a beállított csúszka alapján
+                    mask = (prob > threshold).astype(np.uint8)
 
                 # ==========================================
-                # POST-PROCESSING (TÖREDEZETTSÉG JAVÍTÁSA)
+                # KEMÉNY POST-PROCESSING (Zajszűrés)
                 # ==========================================
-                # a) Morfológiai Zárás (Closing): összeköti a megszakadt kontúrokat
-                kernel = np.ones((5, 5), np.uint8)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                # a) Opening: Letörli a kicsi, magányos zöld pöttyöket
+                kernel_open = np.ones((3, 3), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
                 
-                # b) Lyukak kitöltése (Hollow building fix): kiszínezi az épületek belsejét
-                contours_fill, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(mask, contours_fill, -1, 1, thickness=cv2.FILLED)
+                # b) Closing: Összetapasztja a házak körüli lyukakat
+                kernel_close = np.ones((5, 5), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
 
-                # ==========================================
-                # EREDMÉNYEK KISZÁMÍTÁSA ÉS OVERLAY
-                # ==========================================
-                buildings_data = analyze_buildings(mask, lat, zoom_level)
+                # c) Csak a tényleges, elég nagy épületeket tartjuk meg a maszkban
+                final_mask, buildings_data = analyze_and_clean_mask(mask, lat, zoom_level)
+                
                 total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
 
-                # Zöld maszk rávetítése az eredeti képre
+                # Zöld maszk rávetítése az eredeti képre (immáron a letisztított masszal)
                 overlay = img_np.copy()
-                overlay[mask == 1] = [0, 255, 0]
+                overlay[final_mask == 1] = [0, 255, 0]
                 res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
 
                 # ==========================================
                 # MEGJELENÍTÉS STREAMLITEN
                 # ==========================================
-                
-                # Hőtérkép megjelenítése
-                st.subheader("🔍 A Modell 'Látása' (Heatmap)")
-                st.write("Ezen a képen láthatod, mit gondol épületnek a modell a zöld maszk felhelyezése és a lyukak kitöltése *előtt*.")
-                
-                col_h1, col_h2, col_h3 = st.columns([1, 2, 1])
-                with col_h2:
-                    st.image(cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB), use_container_width=True)
-                
-                st.markdown("---")
-                
-                # Végeredmény és statisztikák
                 c1, c2 = st.columns([1.5, 1])
                 
                 with c1:
-                    st.image(res_img, caption=f"Szegmentált eredmény ({query}) - Zöld Maszk", use_container_width=True)
+                    st.image(res_img, caption=f"Szegmentált eredmény ({query})", use_container_width=True)
                 
                 with c2:
                     st.metric("👥 Becsült összlakosság", int(total_pop))
