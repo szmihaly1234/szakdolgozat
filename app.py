@@ -16,7 +16,7 @@ from geopy.geocoders import ArcGIS
 # 1. KONFIGURÁCIÓ
 # ===============================
 PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
-PT_MODEL_PATH = "unet_model.pth"
+PT_MODEL_PATH = "unet_building_segmentation.pth"
 
 # Ha van saját UNet osztályod, ide másold be a struktúrát!
 # Példa egy egyszerű struktúrára (helyettesítsd a sajátoddal):
