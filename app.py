@@ -101,7 +101,7 @@ def analyze_and_clean_mask(mask, lat, zoom):
         if area_px < 50:  
             continue 
             
-        # Ha átment a teszten, fizikailag is rárajzoljuk a tiszta maszkra
+        # Ha átment a teszten, rárajzoljuk a tiszta maszkra
         cv2.drawContours(clean_mask, [cnt], -1, 1, thickness=cv2.FILLED)
         
         area_m2 = area_px * (m_per_px**2)
@@ -132,8 +132,8 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 # Oldalsáv
 st.sidebar.header("⚙️ Beállítások")
-# A küszöb mostantól a Nyers modell valószínűségeken dolgozik. Magasabbra lőttem be.
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.50, 0.99, 0.85, 0.01, help="Nyers Sigmoid. 0.85 az alap.")
+# Finomított csúszka, apróbb lépésekkel a pengeéles kalibráláshoz
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.500, 0.995, 0.950, 0.005, format="%.3f", help="Nagyon finom hangolás. Keresd meg a 'pengeélt'!")
 zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
 
 # Kereső
@@ -167,16 +167,39 @@ if st.button("Elemzés Futtatása", type="primary"):
                 with torch.no_grad():
                     output = model(input_t)
                     
-                    # 1. Nyers valószínűség generálása (nincs Auto-Kontraszt!)
+                    # 1. Alap valószínűségek generálása
                     prob = torch.sigmoid(output).cpu().numpy()[0, 0]
                     
-                    st.info(f"📊 Nyers Modell Képesség: A legbiztosabb aszfalt/háttér {prob.min()*100:.1f}%, a legbiztosabb épület {prob.max()*100:.1f}%.")
+                    prob_min = prob.min()
+                    prob_max = prob.max()
                     
-                    # 2. Közvetlen küszöbölés a beállított csúszka alapján
-                    mask = (prob > threshold).astype(np.uint8)
+                    # 2. NORMALIZÁLÁS (0-1 közé széthúzzuk az értékeket)
+                    prob_shifted = prob - prob_min
+                    range_val = prob_max - prob_min
+                    
+                    if range_val > 0:
+                        prob_normalized = prob_shifted / range_val
+                    else:
+                        prob_normalized = prob_shifted
+                        
+                    # Gamma korrekció LÁGYÍTVA (hatvány 2.0-ra csökkentve)
+                    prob_gamma = np.power(prob_normalized, 2.0) 
+                    
+                    # --- AUTOMATIKUS (OTSU) KÜSZÖB BECSLÉS ---
+                    prob_8bit = (prob_gamma * 255).astype(np.uint8)
+                    otsu_ret, _ = cv2.threshold(prob_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    otsu_suggested = otsu_ret / 255.0
+                    
+                    st.info(f"💡 **AI Javaslat:** Az algoritmus szerint az ideális vágási pont: **{otsu_suggested:.3f}**. Próbáld oda húzni a csúszkát!")
+                    
+                    # 3. Közvetlen küszöbölés a beállított csúszka alapján
+                    mask = (prob_gamma > threshold).astype(np.uint8)
+                    
+                    # Heatmap generálás a vizualizációhoz
+                    heatmap_colored = cv2.applyColorMap(prob_8bit, cv2.COLORMAP_JET)
 
                 # ==========================================
-                # KEMÉNY POST-PROCESSING (Zajszűrés)
+                # POST-PROCESSING (Zajszűrés és foltozás)
                 # ==========================================
                 # a) Opening: Letörli a kicsi, magányos zöld pöttyöket
                 kernel_open = np.ones((3, 3), np.uint8)
@@ -191,7 +214,7 @@ if st.button("Elemzés Futtatása", type="primary"):
                 
                 total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
 
-                # Zöld maszk rávetítése az eredeti képre (immáron a letisztított masszal)
+                # Zöld maszk rávetítése az eredeti képre
                 overlay = img_np.copy()
                 overlay[final_mask == 1] = [0, 255, 0]
                 res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
@@ -199,6 +222,15 @@ if st.button("Elemzés Futtatása", type="primary"):
                 # ==========================================
                 # MEGJELENÍTÉS STREAMLITEN
                 # ==========================================
+                st.subheader("🔍 A Modell 'Látása' (Heatmap)")
+                st.write("A piros/sárga részeket veszi épületnek, a kéket háttérnek.")
+                
+                col_h1, col_h2, col_h3 = st.columns([1, 2, 1])
+                with col_h2:
+                    st.image(cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB), use_container_width=True)
+                
+                st.markdown("---")
+                
                 c1, c2 = st.columns([1.5, 1])
                 
                 with c1:
