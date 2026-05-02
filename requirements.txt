@@ -1,16 +1,9 @@
 streamlit
-tensorflow
-# PyTorch specifikus csomagok
 torch
 torchvision
-# Képfeldolgozáshoz és segédfunkciókhoz
 opencv-python-headless
-matplotlib
-pillow
-pandas
-numpy
-scikit-learn
 gdown
 geopy
 requests
-tqdm
+numpy
+pillow
