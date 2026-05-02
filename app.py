@@ -12,7 +12,7 @@ from PIL import Image
 from io import BytesIO
 from geopy.geocoders import ArcGIS
 
-# --- ARCHITEKTÚRA --- (Változatlan a legutóbbi működő verzióhoz képest)
+# --- ARCHITEKTÚRA --- (A hibaüzeneted alapján pontosítva)
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -57,74 +57,51 @@ class UNet(nn.Module):
         u1 = self.up1(c2); c1 = self.conv1(torch.cat([d1, u1], dim=1))
         return self.out(c1)
 
-# --- KONFIGURÁCIÓ ---
-PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
-PT_MODEL_PATH = "unet_building_segmentation.pth"
-
+# --- MODEL BETÖLTÉS ---
 @st.cache_resource
 def load_pytorch_model():
-    if not os.path.exists(PT_MODEL_PATH):
-        url = f"https://drive.google.com/uc?id={PT_MODEL_FILE_ID}"
-        gdown.download(url, PT_MODEL_PATH, quiet=False)
+    # Használd a saját Drive ID-dat!
+    file_id = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
+    path = "unet_building_segmentation.pth"
+    if not os.path.exists(path):
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", path, quiet=False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNet(); state_dict = torch.load(PT_MODEL_PATH, map_location=device)
-    model.load_state_dict(state_dict); model.to(device).eval()
+    model = UNet()
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.to(device).eval()
     return model, device
 
-# --- BECSLÉSI LOGIKA ---
-def analyze_buildings(mask, lat, zoom):
-    m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    buildings = []
-    for cnt in contours:
-        area_m2 = cv2.contourArea(cnt) * (m_per_px**2)
-        if area_m2 < 30: continue 
-        if area_m2 < 100: b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
-        elif area_m2 < 300: b_type, pop = 'Közepes lakóház', 3.2 * max(1, area_m2/100)
-        elif area_m2 < 1000: b_type, pop = 'Nagy lakóház', 4.1 * max(1, area_m2/100)
-        else: b_type, pop = 'Társasház', 45 * (max(8, area_m2/80)/10)
-        buildings.append({'Típus': b_type, 'Terület (m2)': round(area_m2, 1), 'Becsült lakosság': round(pop, 1)})
-    return buildings
-
-# --- UI ---
-st.set_page_config(page_title="Lakosság AI (PyTorch)", layout="wide")
-st.title("🛰️ Lakosság AI - Műholdas Becslés")
+# --- UI ÉS LOGIKA ---
+st.title("🛰️ Lakosság AI (Javított Preprocessz)")
 model, device = load_pytorch_model()
 
-# Oldalsáv vezérlők
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.1, 0.95, 0.7, 0.05)
-zoom_level = st.sidebar.select_slider("Zoom szint", options=[18, 19, 20], value=19)
-
-query = st.text_input("Helyszín:", "Budapest, Kálvin tér")
+# Paraméterek
+threshold = st.sidebar.slider("Küszöbérték", 0.1, 0.99, 0.8) # Emelt alapérték a beégés ellen
+query = st.text_input("Cím:", "Budapest, Kálvin tér")
 
 if st.button("Elemzés"):
     loc = ArcGIS().geocode(query)
     if loc:
-        n = 2.0 ** zoom_level
-        xtile = int((loc.longitude + 180.0) / 360.0 * n)
-        ytile = int((1.0 - math.asinh(math.tan(math.radians(loc.latitude))) / math.pi) / 2.0 * n)
-        url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom_level}/{ytile}/{xtile}"
+        # Kép letöltés (Zoom 19)
+        url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/19/{int((1.0 - math.asinh(math.tan(math.radians(loc.latitude))) / math.pi) / 2.0 * 2.0**19)}/{int((loc.longitude + 180.0) / 360.0 * 2.0**19)}"
         img = Image.open(BytesIO(requests.get(url).content)).convert("RGB").resize((512, 512))
         img_np = np.array(img)
 
-        # --- KRITIKUS JAVÍTÁS: NORMALIZÁLÁS ---
-        # Egyszerű [0,1] skálázás, ha a modell nem talált semmit a komplexebb SpaceNet normalizációval
-        input_t = torch.from_numpy(img_np).permute(2, 0, 1).float().unsqueeze(0).to(device) / 255.0
+        # --- A JAVÍTÁS HELYE ---
+        # Ha a notebookban nem használtál Normalize() transzformációt, 
+        # akkor a modell 0-255 közötti floatokat vár!
+        input_t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device).float()
+        # NINCS osztás 255-tel!
 
         with torch.no_grad():
             output = model(input_t)
-            # A képen látható "beégés" ellen emeljük a küszöböt
             prob = torch.sigmoid(output).cpu().numpy()[0, 0]
             mask = (prob > threshold).astype(np.uint8)
 
-        data = analyze_buildings(mask, loc.latitude, zoom_level)
+        # Megjelenítés
+        overlay = img_np.copy()
+        overlay[mask == 1] = [0, 255, 0]
+        st.image(cv2.addWeighted(img_np, 0.7, overlay, 0.3, 0))
         
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            overlay = img_np.copy()
-            overlay[mask == 1] = [0, 255, 0]
-            st.image(cv2.addWeighted(img_np, 0.7, overlay, 0.3, 0), use_container_width=True)
-        with c2:
-            st.metric("Lakosság", int(sum(b['Becsült lakosság'] for b in data)))
-            st.metric("Épületek", len(data))
-            st.dataframe(pd.DataFrame(data))
+        # Statisztika
+        st.write(f"Talált épület-pixelek aránya: {100 * mask.mean():.2f}%")
