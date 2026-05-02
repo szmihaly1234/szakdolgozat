@@ -88,14 +88,14 @@ def load_pytorch_model():
 # 3. NÉPESSÉGBECSLÉSI LOGIKA
 # ==========================================
 def analyze_buildings(mask, lat, zoom):
-    # Egy pixel mérete méterben, a Föld görbületének (szélességi fok) figyelembevételével
+    # Egy pixel mérete méterben, a Föld görbületének figyelembevételével
     m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     buildings = []
     for cnt in contours:
         area_px = cv2.contourArea(cnt)
-        if area_px < 20:  # Zajos, túl apró pixelek szűrése
+        if area_px < 30:  # Zajos, apró pixelek szűrése
             continue 
         
         area_m2 = area_px * (m_per_px**2)
@@ -126,7 +126,7 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 # Oldalsáv
 st.sidebar.header("⚙️ Beállítások")
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.20, 0.05, help="0.2 az alap a Gamma korrekció miatt. Húzd feljebb, ha túl sok a zöld.")
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.20, 0.05, help="Húzd feljebb, ha túl sok a zöld, húzd lejjebb, ha foghíjasak a házak.")
 zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
 
 # Kereső
@@ -155,7 +155,7 @@ if st.button("Elemzés Futtatása", type="primary"):
                 img_np = np.array(img)
 
                 # ==========================================
-                # PREPROCESSZÁLÁS
+                # PREPROCESSZÁLÁS (OpenCV BGR konverzió)
                 # ==========================================
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
                 img_input = img_bgr.astype(np.float32)
@@ -174,9 +174,6 @@ if st.button("Elemzés Futtatása", type="primary"):
                     
                     prob_min = prob.min()
                     prob_max = prob.max()
-                    prob_mean = prob.mean()
-                    
-                    st.info(f"📊 **Modell kimenet analízis:** Min: {prob_min*100:.1f}%, Max: {prob_max*100:.1f}%, Átlag: {prob_mean*100:.1f}%")
                     
                     # 2. AGRESSZÍV NORMALIZÁLÁS ÉS KONTRAST NÖVELÉS
                     prob_shifted = prob - prob_min
@@ -190,7 +187,7 @@ if st.button("Elemzés Futtatása", type="primary"):
                     # Gamma korrekció: A bizonytalan zajt elnyomja, a határozott csúcsokat meghagyja
                     prob_gamma = np.power(prob_normalized, 3.0) 
                     
-                    # 3. Küszöbölés a gamma-korrigált értékeken
+                    # 3. Alap küszöbölés
                     mask = (prob_gamma > threshold).astype(np.uint8)
                     
                     # Heatmap generálása vizualizációhoz
@@ -198,11 +195,23 @@ if st.button("Elemzés Futtatása", type="primary"):
                     heatmap_colored = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
 
                 # ==========================================
+                # POST-PROCESSING (TÖREDEZETTSÉG JAVÍTÁSA)
+                # ==========================================
+                # a) Morfológiai Zárás (Closing): összeköti a megszakadt kontúrokat
+                kernel = np.ones((5, 5), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                
+                # b) Lyukak kitöltése (Hollow building fix): kiszínezi az épületek belsejét
+                contours_fill, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(mask, contours_fill, -1, 1, thickness=cv2.FILLED)
+
+                # ==========================================
                 # EREDMÉNYEK KISZÁMÍTÁSA ÉS OVERLAY
                 # ==========================================
                 buildings_data = analyze_buildings(mask, lat, zoom_level)
                 total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
 
+                # Zöld maszk rávetítése az eredeti képre
                 overlay = img_np.copy()
                 overlay[mask == 1] = [0, 255, 0]
                 res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
@@ -211,11 +220,10 @@ if st.button("Elemzés Futtatása", type="primary"):
                 # MEGJELENÍTÉS STREAMLITEN
                 # ==========================================
                 
-                # Hőtérkép megjelenítése (Mit lát a modell valójában?)
+                # Hőtérkép megjelenítése
                 st.subheader("🔍 A Modell 'Látása' (Heatmap)")
-                st.write("Ezen a képen láthatod, mit gondol épületnek a modell a zöld maszk felhelyezése *előtt*. A piros/sárga területek az épületek, a sötétkék a háttér.")
+                st.write("Ezen a képen láthatod, mit gondol épületnek a modell a zöld maszk felhelyezése és a lyukak kitöltése *előtt*.")
                 
-                # A Heatmap középre rendezve
                 col_h1, col_h2, col_h3 = st.columns([1, 2, 1])
                 with col_h2:
                     st.image(cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB), use_container_width=True)
