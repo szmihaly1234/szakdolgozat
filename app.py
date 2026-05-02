@@ -67,7 +67,7 @@ class UNet(nn.Module):
         return self.out(c1)
 
 # ==========================================
-# 2. MODELL BETÖLTÉSE (Google Drive)
+# 2. MODELL BETÖLTÉSE
 # ==========================================
 PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
 PT_MODEL_PATH = "unet_building_segmentation.pth"
@@ -100,7 +100,7 @@ def analyze_buildings(mask, lat, zoom):
         
         area_m2 = area_px * (m_per_px**2)
         
-        # Kategorizálás
+        # Kategorizálás és lakosság becslés
         if area_m2 < 100:
             b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
         elif area_m2 < 300:
@@ -126,7 +126,7 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 # Oldalsáv
 st.sidebar.header("⚙️ Beállítások")
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.50, 0.05, help="0.5 az alap. Húzd feljebb, ha túl sok a zöld, és lejjebb, ha nem találja az épületeket.")
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.20, 0.05, help="0.2 az alap a Gamma korrekció miatt. Húzd feljebb, ha túl sok a zöld.")
 zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
 
 # Kereső
@@ -155,22 +155,16 @@ if st.button("Elemzés Futtatása", type="primary"):
                 img_np = np.array(img)
 
                 # ==========================================
-                # PREPROCESSZÁLÁS (A legfontosabb javítások)
+                # PREPROCESSZÁLÁS
                 # ==========================================
-                # OpenCV BGR formátum konverzió (az Albumentations betöltés miatt)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                
-                # Típusváltás float32-re (Osztás NÉLKÜL, hagyjuk 0-255 között)
                 img_input = img_bgr.astype(np.float32)
 
-                # Modell előkészítése
                 model, device = load_pytorch_model()
-
-                # Tenzorrá alakítás és áthelyezés CPU/GPU-ra
                 input_t = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).to(device=device)
 
                 # ==========================================
-                # MODELL FUTTATÁSA ÉS AUTO-KONTRAZT
+                # MODELL FUTTATÁSA ÉS AGRESSZÍV KONTRAST
                 # ==========================================
                 with torch.no_grad():
                     output = model(input_t)
@@ -178,38 +172,61 @@ if st.button("Elemzés Futtatása", type="primary"):
                     # 1. Alap valószínűségek generálása
                     prob = torch.sigmoid(output).cpu().numpy()[0, 0]
                     
-                    # 2. Diagnosztika (Látható marad a felületen segítségképp)
                     prob_min = prob.min()
                     prob_max = prob.max()
-                    st.info(f"📊 **Modell skála kalibrálva:** A legkisebb valószínűség {prob_min*100:.1f}%, a legnagyobb {prob_max*100:.1f}% volt. (Auto-Kontraszt aktív).")
+                    prob_mean = prob.mean()
                     
-                    # 3. AUTO-KONTRAST (Min-Max skálázás 0 és 1 közé)
-                    if prob_max > prob_min:
-                        prob_normalized = (prob - prob_min) / (prob_max - prob_min)
+                    st.info(f"📊 **Modell kimenet analízis:** Min: {prob_min*100:.1f}%, Max: {prob_max*100:.1f}%, Átlag: {prob_mean*100:.1f}%")
+                    
+                    # 2. AGRESSZÍV NORMALIZÁLÁS ÉS KONTRAST NÖVELÉS
+                    prob_shifted = prob - prob_min
+                    range_val = prob_max - prob_min
+                    
+                    if range_val > 0:
+                        prob_normalized = prob_shifted / range_val
                     else:
-                        prob_normalized = prob
+                        prob_normalized = prob_shifted
                         
-                    # 4. Küszöbölés a beállított threshold alapján
-                    mask = (prob_normalized > threshold).astype(np.uint8)
+                    # Gamma korrekció: A bizonytalan zajt elnyomja, a határozott csúcsokat meghagyja
+                    prob_gamma = np.power(prob_normalized, 3.0) 
+                    
+                    # 3. Küszöbölés a gamma-korrigált értékeken
+                    mask = (prob_gamma > threshold).astype(np.uint8)
+                    
+                    # Heatmap generálása vizualizációhoz
+                    heatmap_img = (prob_gamma * 255).astype(np.uint8)
+                    heatmap_colored = cv2.applyColorMap(heatmap_img, cv2.COLORMAP_JET)
 
                 # ==========================================
-                # EREDMÉNYEK KISZÁMÍTÁSA
+                # EREDMÉNYEK KISZÁMÍTÁSA ÉS OVERLAY
                 # ==========================================
                 buildings_data = analyze_buildings(mask, lat, zoom_level)
                 total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
 
-                # Kép overlay (Zöld maszk rávetítése)
                 overlay = img_np.copy()
                 overlay[mask == 1] = [0, 255, 0]
                 res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
 
                 # ==========================================
-                # MEGJELENÍTÉS
+                # MEGJELENÍTÉS STREAMLITEN
                 # ==========================================
+                
+                # Hőtérkép megjelenítése (Mit lát a modell valójában?)
+                st.subheader("🔍 A Modell 'Látása' (Heatmap)")
+                st.write("Ezen a képen láthatod, mit gondol épületnek a modell a zöld maszk felhelyezése *előtt*. A piros/sárga területek az épületek, a sötétkék a háttér.")
+                
+                # A Heatmap középre rendezve
+                col_h1, col_h2, col_h3 = st.columns([1, 2, 1])
+                with col_h2:
+                    st.image(cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB), use_container_width=True)
+                
+                st.markdown("---")
+                
+                # Végeredmény és statisztikák
                 c1, c2 = st.columns([1.5, 1])
                 
                 with c1:
-                    st.image(res_img, caption=f"Szegmentált eredmény ({query})", use_container_width=True)
+                    st.image(res_img, caption=f"Szegmentált eredmény ({query}) - Zöld Maszk", use_container_width=True)
                 
                 with c2:
                     st.metric("👥 Becsült összlakosság", int(total_pop))
