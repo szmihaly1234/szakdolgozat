@@ -170,9 +170,22 @@ if st.button("Elemzés Futtatása", type="primary"):
                 # Predikció
                 with torch.no_grad():
                     output = model(input_t)
-                    # A valószínűség kiszámítása sigmoid segítségével
-                    prob = torch.sigmoid(output).cpu().numpy()[0, 0]
-                    # Küszöbözés a megadott érték alapján
+                    # --- DIAGNOSZTIKA KIÍRÁSA A STREAMLITRE ---
+                    out_min = output.min().item()
+                    out_max = output.max().item()
+                    out_mean = output.mean().item()
+            
+                    st.info(f"🔍 **Nyers modell kimenet statisztika:** Min: {out_min:.4f} | Max: {out_max:.4f} | Átlag: {out_mean:.4f}")
+            
+                     # --- DUPLA SIGMOID VÉDELEM ---
+                    # Ha a kimenet már eleve 0 és 1 között van, akkor a modellben már benne van a Sigmoid!
+                    if out_min >= 0.0 and out_max <= 1.0:
+                        st.warning("⚠️ A modell már valószínűségeket (0-1) adott vissza! Kikapcsoltam az extra Sigmoidot.")
+                        prob = output.cpu().numpy()[0, 0]
+                    else:
+                    # Ha a kimenetek pl. -15 és +15 között vannak (Logits), akkor kell a Sigmoid
+                        prob = torch.sigmoid(output).cpu().numpy()[0, 0]
+                
                     mask = (prob > threshold).astype(np.uint8)
 
                 # ==========================================
