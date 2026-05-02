@@ -4,174 +4,117 @@ import pandas as pd
 import cv2
 import gdown
 import streamlit as st
-import tensorflow as tf
-import torch  # ÚJ
-import torch.nn as nn # ÚJ
-from tensorflow.keras import backend as K
-from PIL import Image
-import time
-import math
+import torch
+import torch.nn as nn
 import requests
+import math
+from PIL import Image
 from io import BytesIO
-from geopy.geocoders import Nominatim, ArcGIS
+from geopy.geocoders import ArcGIS
 
 # ===============================
-# 1. KONFIGURÁCIÓ & ID-K
+# 1. KONFIGURÁCIÓ
 # ===============================
+PT_MODEL_FILE_ID = "IDE_ÍRD_BE_A_DRIVE_ID_T" 
+PT_MODEL_PATH = "unet_model.pth"
 
-# TensorFlow ID-k (maradnak)
-MODEL_FILE_ID = "19Mw_N1ilU58ipoQ6-BdSbPVtHAlSsn2u"
-MODEL_PATH = "model.h5"
-WEIGHTS_FILE_ID = "1yMIvlRR6mqKLQ46k9Gh-cvGi83mPJnIB" 
-WEIGHTS_PATH = "paris_tuned_weights.weights.h5"
-
-# PyTorch ID-k (IDE ÍRD BE A SAJÁT ID-DAT)
-PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
-PT_MODEL_PATH = "unet_building_segmentation.pth"
-
-# ===============================
-# 2. PYTORCH MODEL DEFINÍCIÓ
-# ===============================
-# Megjegyzés: Itt az UNet osztályodnak szerepelnie kell, 
-# hogy a torch.load tudja, mit példányosít.
+# Ha van saját UNet osztályod, ide másold be a struktúrát!
+# Példa egy egyszerű struktúrára (helyettesítsd a sajátoddal):
 class UNet(nn.Module):
     def __init__(self):
         super(UNet, self).__init__()
-        # Ide másold be a saját UNet __init__ és forward részedet röviden
-        # Vagy ha külső fájlban van, importáld be: from my_models import UNet
-        pass 
+        # Ide jön a te 512x512-es architektúrád
+        pass
+    def forward(self, x):
+        # ...
+        return x
 
 # ===============================
-# 3. MODELL BETÖLTÉS (Dinamikus)
+# 2. SEGÉDFÜGGVÉNYEK
 # ===============================
 
-@st.cache_resource(show_spinner=False)
-def load_any_model(model_type, weights_option=None):
-    """
-    Betölti a kiválasztott modellt (TF vagy PyTorch)
-    """
-    if model_type == "PyTorch (Új)":
-        ensure_file_from_drive(PT_MODEL_FILE_ID, PT_MODEL_PATH)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # Példányosítás (cseréld a sajátodra)
-        model = UNet() 
-        try:
-            model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
-            model.to(device)
-            model.eval()
-            return model, "PyTorch UNet", "pt"
-        except Exception as e:
-            return None, f"PyTorch hiba: {e}", None
-            
-    else: # TensorFlow ág
-        K.clear_session()
-        ensure_file_from_drive(MODEL_FILE_ID, MODEL_PATH)
-        active_weights = WEIGHTS_PATH if weights_option == "Párizs/EU" else None
-        if active_weights:
-            ensure_file_from_drive(WEIGHTS_FILE_ID, WEIGHTS_PATH)
-            
-        from tensorflow.keras.layers import DepthwiseConv2D
-        class FixedDepthwiseConv2D(DepthwiseConv2D):
-            def __init__(self, **kwargs):
-                kwargs.pop('groups', None)
-                super().__init__(**kwargs)
-
-        model = tf.keras.models.load_model(
-            MODEL_PATH,
-            custom_objects={'dice_loss': dice_loss, 'dice_coef': dice_coef, 'DepthwiseConv2D': FixedDepthwiseConv2D},
-            compile=False
-        )
-        if active_weights:
-            model.load_weights(active_weights)
-            return model, "TF Párizsi modell", "tf"
-        return model, "TF Globális modell", "tf"
-
-# ===============================
-# 4. ÁTDOLGOZOTT ANALÍZIS LOGIKA
-# ===============================
-
-def analyze(model, model_framework, image, px_to_m, threshold, overlap, road_sensitivity):
-    image_enhanced = enhance_with_clahe(image)
-    orig_np = np.array(image_enhanced.convert("RGB"))
-    
-    # Sliding window hívása (marad a régi, de a belseje okosabb lesz)
-    raw_mask = predict_sliding_window_universal(model, model_framework, orig_np, tile_size=320, overlap=overlap)
-    
-    binary_mask = (raw_mask > threshold).astype(np.uint8)
-    buildings = segment_buildings_with_road_filter(binary_mask, min_size=50, max_aspect_ratio=road_sensitivity)
-    
-    results = []
-    total_pop = 0
-    for i, b in enumerate(buildings):
-        area_m2 = b['area'] * (px_to_m ** 2)
-        btype = estimate_building_type(area_m2)
-        pop = estimate_population(btype, area_m2)
-        total_pop += pop
-        results.append({'id': i+1, 'type': btype, 'area_m2': round(area_m2,1), 'population': pop, 'bbox': b['bbox']})
-        
-    return orig_np, raw_mask, binary_mask, results, total_pop
-
-def predict_sliding_window_universal(model, framework, full_image, tile_size=320, overlap=0.5):
-    h, w, c = full_image.shape
-    stride = int(tile_size * (1 - overlap))
-    padded_image = cv2.copyMakeBorder(full_image, 0, (tile_size - (h % stride)) % stride, 0, (tile_size - (w % stride)) % stride, cv2.BORDER_REFLECT_101)
-    ph, pw, _ = padded_image.shape
-    
-    full_mask = np.zeros((ph, pw), dtype=np.float32)
-    count_mask = np.ones((ph, pw), dtype=np.float32) # count_mask az átlagoláshoz
+@st.cache_resource
+def load_pytorch_model():
+    if not os.path.exists(PT_MODEL_PATH):
+        url = f"https://drive.google.com/uc?id={PT_MODEL_FILE_ID}"
+        gdown.download(url, PT_MODEL_PATH, quiet=False)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = UNet() # Inicializáld az osztályodat
+    # Súlyok betöltése (map_location fontos a CPU/GPU váltás miatt)
+    state_dict = torch.load(PT_MODEL_PATH, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model, device
 
-    for y in range(0, ph - tile_size + 1, stride):
-        for x in range(0, pw - tile_size + 1, stride):
-            tile = padded_image[y:y+tile_size, x:x+tile_size]
-            
-            if framework == "tf":
-                pre = spacenet_preprocessing(tile)
-                pred = model.predict(np.expand_dims(pre, axis=0), verbose=0)[0, :, :, 0]
-            else: # PYTORCH ÁG
-                # NHWC -> NCHW konverzió és normalizálás
-                tile_pt = torch.from_numpy(tile).permute(2, 0, 1).float() / 255.0
-                tile_pt = tile_pt.unsqueeze(0).to(device)
-                with torch.no_grad():
-                    logits = model(tile_pt)
-                    pred = torch.sigmoid(logits).cpu().numpy()[0, 0, :, :]
-            
-            full_mask[y:y+tile_size, x:x+tile_size] += pred
-            # Itt lehetne count_mask-ot is növelni, ha pontos átlagolás kell
+def meters_per_pixel(lat, zoom):
+    return math.cos(math.radians(lat)) * (2 * math.pi * 6378137.0) / (256 * (2 ** zoom))
 
-    return full_mask[:h, :w]
+def get_satellite_img(query, zoom=19):
+    geolocator = ArcGIS()
+    loc = geolocator.geocode(query)
+    if not loc: return None, None
+    
+    # Egyszerűsített tile letöltés (1db központi tile a példa kedvéért)
+    # A korábbi 3x3-as rácsodat is visszateheted ide
+    lat, lon = loc.latitude, loc.longitude
+    n = 2.0 ** zoom
+    xtile = int((lon + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+    
+    url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{ytile}/{xtile}"
+    res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+    return Image.open(BytesIO(res.content)), (lat, zoom)
 
 # ===============================
-# 5. FŐ UI FRISSÍTÉSE
+# 3. UI ÉS LOGIKA
 # ===============================
 
-def main():
-    st.title("Lakosság AI (Auto-Scale 🛰️)")
+st.set_page_config(page_title="Building AI - PyTorch", layout="wide")
+st.title("🛰️ Épületszegmentáló (PyTorch Only)")
 
-    st.sidebar.title("⚙️ Beállítások")
-    st.sidebar.subheader("1. AI Modell Kiválasztása")
-    
-    # Modell típus választó
-    engine = st.sidebar.selectbox("Motor:", ["TensorFlow", "PyTorch (Új)"])
-    
-    if engine == "TensorFlow":
-        model_option = st.sidebar.radio("Verzió:", ("Globális", "Párizs/EU"))
-    else:
-        model_option = "Új verzió"
+model, device = load_pytorch_model()
 
-    with st.spinner("Modell betöltése Driveról..."):
-        model, status_msg, framework = load_any_model(engine, model_option)
+search_query = st.text_input("Helyszín keresése:", "Budapest, Parlament")
+
+if st.button("Keresés és Elemzés"):
+    img, geo_data = get_satellite_img(search_query)
     
-    if not model: 
-        st.error(status_msg)
-        st.stop()
+    if img:
+        # 1. Előkészítés 512x512-re
+        img_resized = img.resize((512, 512))
+        img_np = np.array(img_resized)
         
-    st.sidebar.success(f"Aktív: {status_msg}")
-
-    # ... (többi UI elem változatlan) ...
-
-    # Elemzés hívásánál átadjuk a framework típusát:
-    # run_analysis(model, framework, image, ...) 
-
-# A run_analysis függvényt is frissíteni kell, hogy továbbadja a 'framework' változót!
+        # 2. PyTorch Preprocessing (RGB, NCHW, Normalizált)
+        input_tensor = torch.from_numpy(img_np).permute(2, 0, 1).float() / 255.0
+        input_tensor = input_tensor.unsqueeze(0).to(device)
+        
+        # 3. Predikció
+        with torch.no_grad():
+            output = model(input_tensor)
+            # Ha a modelled logits-ot ad vissza:
+            prob = torch.sigmoid(output).cpu().numpy()[0, 0, :, :]
+            mask = (prob > 0.5).astype(np.uint8)
+            
+        # 4. Megjelenítés
+        col1, col2 = st.columns(2)
+        col1.image(img_resized, caption="Eredeti műholdkép (512x512)")
+        
+        # Maszk rávetítése (Overlay)
+        overlay = img_np.copy()
+        overlay[mask == 1] = [255, 0, 0] # Piros szín az épületeknek
+        combined = cv2.addWeighted(img_np, 0.7, overlay, 0.3, 0)
+        col2.image(combined, caption="Szegmentált eredmény")
+        
+        # Terület számítás
+        lat, zoom = geo_data
+        m_per_px = meters_per_pixel(lat, zoom)
+        # Mivel 512-re skáláztuk az eredetileg 256-os tile-t, korrigálni kell
+        pixel_size_corrected = m_per_px * (256 / 512)
+        
+        building_pixels = np.sum(mask)
+        total_area = building_pixels * (pixel_size_corrected ** 2)
+        st.metric("Becsült beépített terület", f"{total_area:.2f} m²")
+    else:
+        st.error("Nem található ilyen helyszín.")
