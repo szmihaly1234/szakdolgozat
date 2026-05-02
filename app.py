@@ -13,7 +13,7 @@ from io import BytesIO
 from geopy.geocoders import ArcGIS
 
 # ==========================================
-# 1. ARCHITEKTÚRA (A tanított súlyokhoz)
+# 1. ARCHITEKTÚRA DEFINÍCIÓ (U-Net)
 # ==========================================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -67,12 +67,12 @@ class UNet(nn.Module):
         return self.out(c1)
 
 # ==========================================
-# 2. KONFIGURÁCIÓ ÉS BETÖLTÉS
+# 2. MODELL BETÖLTÉSE (Google Drive)
 # ==========================================
 PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
 PT_MODEL_PATH = "unet_building_segmentation.pth"
 
-@st.cache_resource(show_spinner="AI Modell letöltése és betöltése (ez elsőre eltarthat egy percig)...")
+@st.cache_resource(show_spinner="AI Modell letöltése és betöltése a memóriába...")
 def load_pytorch_model():
     if not os.path.exists(PT_MODEL_PATH):
         url = f"https://drive.google.com/uc?id={PT_MODEL_FILE_ID}"
@@ -85,21 +85,22 @@ def load_pytorch_model():
     return model, device
 
 # ==========================================
-# 3. NÉPESSÉG ÉS MÉRET LOGIKA
+# 3. NÉPESSÉGBECSLÉSI LOGIKA
 # ==========================================
 def analyze_buildings(mask, lat, zoom):
-    # Kiszámoljuk egy pixel pontos méretét méterben a megadott szélességi fokon
+    # Egy pixel mérete méterben, a Föld görbületének (szélességi fok) figyelembevételével
     m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     buildings = []
     for cnt in contours:
         area_px = cv2.contourArea(cnt)
-        if area_px < 20: continue # Apró "zaj" eldobása
+        if area_px < 20:  # Zajos, túl apró pixelek szűrése
+            continue 
         
         area_m2 = area_px * (m_per_px**2)
         
-        # Lakosság becslés logika
+        # Kategorizálás
         if area_m2 < 100:
             b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
         elif area_m2 < 300:
@@ -118,22 +119,23 @@ def analyze_buildings(mask, lat, zoom):
     return buildings
 
 # ==========================================
-# 4. STREAMLIT UI
+# 4. STREAMLIT FELHASZNÁLÓI FELÜLET (UI)
 # ==========================================
 st.set_page_config(page_title="Lakosság AI (PyTorch)", layout="wide", page_icon="🛰️")
-st.title("🛰️ Lakosság AI - Műholdas Becslés")
+st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
-# Oldalsáv vezérlők
+# Oldalsáv
 st.sidebar.header("⚙️ Beállítások")
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.50, 0.05, help="Ha túl sok a zöld, húzd feljebb. Ha nem talál épületet, húzd lejjebb.")
-zoom_level = st.sidebar.select_slider("Zoom szint", options=[18, 19, 20], value=19)
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.05, 0.95, 0.50, 0.05, help="0.5 az alap. Húzd feljebb, ha túl sok a zöld, és lejjebb, ha nem találja az épületeket.")
+zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
 
-# Keresőmező
+# Kereső
 query = st.text_input("Helyszín keresése (település, utca):", "Budapest, Hősök tere")
 
 if st.button("Elemzés Futtatása", type="primary"):
     with st.spinner("Műholdkép elemzése folyamatban..."):
-        # 1. Helyszín keresése
+        
+        # 1. Helyszín koordinátáinak lekérése
         geolocator = ArcGIS()
         loc = geolocator.geocode(query)
         
@@ -143,76 +145,80 @@ if st.button("Elemzés Futtatása", type="primary"):
             xtile = int((lon + 180.0) / 360.0 * n)
             ytile = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
             
-            # 2. ArcGIS Tile Letöltése
+            # 2. Kép letöltése az ESRI ArcGIS szerveréről
             url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom_level}/{ytile}/{xtile}"
             response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
             
             if response.status_code == 200:
-                # Eredeti RGB kép
+                # Eredeti RGB kép betöltése
                 img = Image.open(BytesIO(response.content)).convert("RGB").resize((512, 512))
                 img_np = np.array(img)
 
                 # ==========================================
-                # JAVÍTOTT PREPROCESSZÁLÁS (Albumentations alapján)
+                # PREPROCESSZÁLÁS (A legfontosabb javítások)
                 # ==========================================
-                # A notebookban valószínűleg cv2.imread volt, ami BGR-ben tölt be.
+                # OpenCV BGR formátum konverzió (az Albumentations betöltés miatt)
                 img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
                 
-                # Nincs / 255.0 ! Az értékek 0-255 között maradnak (Float32).
+                # Típusváltás float32-re (Osztás NÉLKÜL, hagyjuk 0-255 között)
                 img_input = img_bgr.astype(np.float32)
 
-                # Modell betöltése
+                # Modell előkészítése
                 model, device = load_pytorch_model()
 
-                # Tenzorrá alakítás és áthelyezés a számítási eszközre (CPU/GPU)
+                # Tenzorrá alakítás és áthelyezés CPU/GPU-ra
                 input_t = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).to(device=device)
 
-                # Predikció
+                # ==========================================
+                # MODELL FUTTATÁSA ÉS AUTO-KONTRAZT
+                # ==========================================
                 with torch.no_grad():
                     output = model(input_t)
-                    # --- DIAGNOSZTIKA KIÍRÁSA A STREAMLITRE ---
-                    out_min = output.min().item()
-                    out_max = output.max().item()
-                    out_mean = output.mean().item()
-            
-                    st.info(f"🔍 **Nyers modell kimenet statisztika:** Min: {out_min:.4f} | Max: {out_max:.4f} | Átlag: {out_mean:.4f}")
-            
-                     # --- DUPLA SIGMOID VÉDELEM ---
-                    # Ha a kimenet már eleve 0 és 1 között van, akkor a modellben már benne van a Sigmoid!
-                    if out_min >= 0.0 and out_max <= 1.0:
-                        st.warning("⚠️ A modell már valószínűségeket (0-1) adott vissza! Kikapcsoltam az extra Sigmoidot.")
-                        prob = output.cpu().numpy()[0, 0]
+                    
+                    # 1. Alap valószínűségek generálása
+                    prob = torch.sigmoid(output).cpu().numpy()[0, 0]
+                    
+                    # 2. Diagnosztika (Látható marad a felületen segítségképp)
+                    prob_min = prob.min()
+                    prob_max = prob.max()
+                    st.info(f"📊 **Modell skála kalibrálva:** A legkisebb valószínűség {prob_min*100:.1f}%, a legnagyobb {prob_max*100:.1f}% volt. (Auto-Kontraszt aktív).")
+                    
+                    # 3. AUTO-KONTRAST (Min-Max skálázás 0 és 1 közé)
+                    if prob_max > prob_min:
+                        prob_normalized = (prob - prob_min) / (prob_max - prob_min)
                     else:
-                    # Ha a kimenetek pl. -15 és +15 között vannak (Logits), akkor kell a Sigmoid
-                        prob = torch.sigmoid(output).cpu().numpy()[0, 0]
-                
-                    mask = (prob > threshold).astype(np.uint8)
+                        prob_normalized = prob
+                        
+                    # 4. Küszöbölés a beállított threshold alapján
+                    mask = (prob_normalized > threshold).astype(np.uint8)
 
                 # ==========================================
-                # EREDMÉNYEK FELDOLGOZÁSA
+                # EREDMÉNYEK KISZÁMÍTÁSA
                 # ==========================================
                 buildings_data = analyze_buildings(mask, lat, zoom_level)
                 total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
 
-                # Kép overlay generálása
+                # Kép overlay (Zöld maszk rávetítése)
                 overlay = img_np.copy()
-                overlay[mask == 1] = [0, 255, 0] # Zöld maszk az épületekre
+                overlay[mask == 1] = [0, 255, 0]
                 res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
 
-                # Képernyő felosztása 2 oszlopra
+                # ==========================================
+                # MEGJELENÍTÉS
+                # ==========================================
                 c1, c2 = st.columns([1.5, 1])
                 
                 with c1:
-                    st.image(res_img, caption=f"Eredmény ({query})", use_container_width=True)
+                    st.image(res_img, caption=f"Szegmentált eredmény ({query})", use_container_width=True)
                 
                 with c2:
-                    st.metric("👥 Összes becsült lakosszám", int(total_pop))
-                    st.metric("🏠 Talált épületek száma", len(buildings_data))
+                    st.metric("👥 Becsült összlakosság", int(total_pop))
+                    st.metric("🏠 Felismert épületek", len(buildings_data))
                     
                     if buildings_data:
                         df = pd.DataFrame(buildings_data)
                         st.dataframe(df, hide_index=True)
             else:
-                st.error("Nem sikerült letölteni a műholdképet (Hálózati hiba).")
+                st.error("Nem sikerült letölteni a műholdképet. Kérlek próbálj meg egy másik helyszínt!")
         else:
-            st.error("A megadott helyszín nem található. Próbálj meg egy másik címet!")
+            st.error("A megadott helyszín nem található.")
