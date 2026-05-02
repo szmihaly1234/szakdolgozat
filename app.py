@@ -15,7 +15,7 @@ from geopy.geocoders import ArcGIS
 # ===============================
 # 1. KONFIGURÁCIÓ
 # ===============================
-PT_MODEL_FILE_ID = "IDE_ÍRD_BE_A_DRIVE_ID_T" 
+PT_MODEL_FILE_ID = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
 PT_MODEL_PATH = "unet_model.pth"
 
 # Ha van saját UNet osztályod, ide másold be a struktúrát!
