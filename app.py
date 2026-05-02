@@ -12,7 +12,9 @@ from PIL import Image
 from io import BytesIO
 from geopy.geocoders import ArcGIS
 
-# --- ARCHITEKTÚRA --- (A hibaüzeneted alapján pontosítva)
+# ===============================
+# 1. ARCHITEKTÚRA (State_dict kompatibilis)
+# ===============================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -57,51 +59,67 @@ class UNet(nn.Module):
         u1 = self.up1(c2); c1 = self.conv1(torch.cat([d1, u1], dim=1))
         return self.out(c1)
 
-# --- MODEL BETÖLTÉS ---
 @st.cache_resource
 def load_pytorch_model():
-    # Használd a saját Drive ID-dat!
-    file_id = "1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy" 
     path = "unet_building_segmentation.pth"
     if not os.path.exists(path):
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", path, quiet=False)
+        gdown.download(f"https://drive.google.com/uc?id=1gZgDnZiX1nTfBLQiqESLFcQzZO5HHrVy", path, quiet=False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet()
     model.load_state_dict(torch.load(path, map_location=device))
     model.to(device).eval()
     return model, device
 
-# --- UI ÉS LOGIKA ---
-st.title("🛰️ Lakosság AI (Javított Preprocessz)")
+# ===============================
+# 2. UI ÉS ELŐFELDOLGOZÁS
+# ===============================
+st.set_page_config(page_title="Lakosság AI (Végleges Fix)", layout="wide")
+st.title("🛰️ Lakosság AI - Preprocessz Teszt")
+
 model, device = load_pytorch_model()
 
-# Paraméterek
-threshold = st.sidebar.slider("Küszöbérték", 0.1, 0.99, 0.8) # Emelt alapérték a beégés ellen
-query = st.text_input("Cím:", "Budapest, Kálvin tér")
+st.sidebar.header("Beállítások")
+# Ez a legfontosabb: választani tudunk a normalizálási módok között
+norm_mode = st.sidebar.radio("Normalizációs mód:", ["Nyers (0-255)", "Standard (0-1)", "SpaceNet Mean/Std"])
+threshold = st.sidebar.slider("Küszöbérték (Threshold)", 0.0, 1.0, 0.5)
 
-if st.button("Elemzés"):
+query = st.text_input("Cím:", "Budapest, Corvin köz")
+
+if st.button("Elemzés Futtatása"):
     loc = ArcGIS().geocode(query)
     if loc:
-        # Kép letöltés (Zoom 19)
-        url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/19/{int((1.0 - math.asinh(math.tan(math.radians(loc.latitude))) / math.pi) / 2.0 * 2.0**19)}/{int((loc.longitude + 180.0) / 360.0 * 2.0**19)}"
+        zoom = 19
+        n = 2.0 ** zoom
+        url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{int((1.0 - math.asinh(math.tan(math.radians(loc.latitude))) / math.pi) / 2.0 * n)}/{int((loc.longitude + 180.0) / 360.0 * n)}"
         img = Image.open(BytesIO(requests.get(url).content)).convert("RGB").resize((512, 512))
         img_np = np.array(img)
 
-        # --- A JAVÍTÁS HELYE ---
-        # Ha a notebookban nem használtál Normalize() transzformációt, 
-        # akkor a modell 0-255 közötti floatokat vár!
-        input_t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device).float()
-        # NINCS osztás 255-tel!
+        # Preprocesszálás választás alapján
+        img_input = img_np.copy().astype(np.float32)
+        
+        if norm_mode == "Standard (0-1)":
+            img_input /= 255.0
+        elif norm_mode == "SpaceNet Mean/Std":
+            mean = np.array([0.339, 0.324, 0.285])
+            std = np.array([0.139, 0.125, 0.122])
+            img_input = (img_input / 255.0 - mean) / std
+
+        input_t = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).to(device)
 
         with torch.no_grad():
             output = model(input_t)
+            # A sigmoid-ot csak akkor használjuk, ha a modell nem tartalmazza!
             prob = torch.sigmoid(output).cpu().numpy()[0, 0]
             mask = (prob > threshold).astype(np.uint8)
 
-        # Megjelenítés
-        overlay = img_np.copy()
-        overlay[mask == 1] = [0, 255, 0]
-        st.image(cv2.addWeighted(img_np, 0.7, overlay, 0.3, 0))
-        
-        # Statisztika
-        st.write(f"Talált épület-pixelek aránya: {100 * mask.mean():.2f}%")
+        # Vizualizáció
+        c1, c2 = st.columns(2)
+        with c1:
+            st.image(img, caption="Eredeti kép")
+        with c2:
+            overlay = img_np.copy()
+            overlay[mask == 1] = [0, 255, 0]
+            st.image(cv2.addWeighted(img_np, 0.7, overlay, 0.3, 0), caption=f"Eredmény ({norm_mode})")
+            
+        st.write(f"Nyers modell kimenet (átlag): {output.mean().item():.4f}")
+        st.write(f"Sigmoid utáni átlag: {prob.mean():.4f}")
