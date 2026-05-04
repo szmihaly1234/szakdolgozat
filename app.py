@@ -5,7 +5,6 @@ import cv2
 import gdown
 import streamlit as st
 import torch
-import torch.nn as nn
 import requests
 import math
 from PIL import Image
@@ -13,79 +12,42 @@ from io import BytesIO
 from geopy.geocoders import ArcGIS
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import segmentation_models_pytorch as smp
 
 # ==========================================
-# 1. ARCHITEKTÚRA DEFINÍCIÓ (U-Net)
-# ==========================================
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DoubleConv, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-    def forward(self, x): 
-        return self.conv(x)
-
-class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1):
-        super(UNet, self).__init__()
-        self.down1 = DoubleConv(in_channels, 64)
-        self.down2 = DoubleConv(64, 128)
-        self.down3 = DoubleConv(128, 256)
-        self.down4 = DoubleConv(256, 512)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.bottleneck = DoubleConv(512, 1024)
-        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.conv4 = DoubleConv(1024, 512)
-        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.conv3 = DoubleConv(512, 256)
-        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.conv2 = DoubleConv(256, 128)
-        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.conv1 = DoubleConv(128, 64)
-        self.out = nn.Conv2d(64, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        d1 = self.down1(x); p1 = self.pool(d1)
-        d2 = self.down2(p1); p2 = self.pool(d2)
-        d3 = self.down3(p2); p3 = self.pool(d3)
-        d4 = self.down4(p3); p4 = self.pool(d4)
-        bn = self.bottleneck(p4)
-        u4 = self.up4(bn); c4 = self.conv4(torch.cat([d4, u4], dim=1))
-        u3 = self.up3(c4); c3 = self.conv3(torch.cat([d3, u3], dim=1))
-        u2 = self.up2(c3); c2 = self.conv2(torch.cat([d2, u2], dim=1))
-        u1 = self.up1(c2); c1 = self.conv1(torch.cat([d1, u1], dim=1))
-        return self.out(c1)
-
-# ==========================================
-# 2. MODELL BETÖLTÉSE
+# 1. MODELL BETÖLTÉSE (ResNet34 U-Net)
 # ==========================================
 PT_MODEL_FILE_ID = "1Pn5gSZSQ9D3CEGHKsnmXRGo3dt7dhMnT" 
 PT_MODEL_PATH = "best_resnet34_unet.pth"
 
-@st.cache_resource(show_spinner="AI Modell letöltése...")
+@st.cache_resource(show_spinner="AI Modell letöltése és betöltése (ResNet34)...")
 def load_pytorch_model():
     if not os.path.exists(PT_MODEL_PATH):
         url = f"https://drive.google.com/uc?id={PT_MODEL_FILE_ID}"
         gdown.download(url, PT_MODEL_PATH, quiet=False)
+        
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNet()
+    
+    # SMP modell inicializálása
+    model = smp.Unet(
+        encoder_name="resnet34",
+        encoder_weights=None, # Itt már a te saját betanított súlyaidat használjuk
+        in_channels=3,
+        classes=1,
+        activation=None 
+    )
+    
     model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
-    model.to(device).train()
+    model.to(device).eval() # A ResNetnél ez már tökéletesen fog működni
     return model, device
 
 # ==========================================
-# 3. NÉPESSÉGBECSLÉSI LOGIKA
+# 2. NÉPESSÉGBECSLÉSI LOGIKA
 # ==========================================
 def analyze_and_clean_mask(mask, lat, zoom):
     # Ha feltöltött képünk van (nincs lat/zoom), alapértelmezett méretarányt használunk
     if lat is None or zoom is None:
-        m_per_px = 0.5 # Átlagos felbontás feltöltött képnél
+        m_per_px = 0.5 
     else:
         m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
     
@@ -100,6 +62,7 @@ def analyze_and_clean_mask(mask, lat, zoom):
         cv2.drawContours(clean_mask, [cnt], -1, 1, thickness=cv2.FILLED)
         area_m2 = area_px * (m_per_px**2)
         
+        # Becslési heurisztika
         if area_m2 < 100:
             b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
         elif area_m2 < 300:
@@ -107,20 +70,20 @@ def analyze_and_clean_mask(mask, lat, zoom):
         elif area_m2 < 1000:
             b_type, pop = 'Nagy lakóház', 4.1 * max(1, area_m2/100)
         else:
-            b_type, pop = 'Társasház', 45 * (max(8, area_m2/80)/10)
+            b_type, pop = 'Társasház / Intézmény', 45 * (max(8, area_m2/80)/10)
             
         buildings.append({'Típus': b_type, 'Terület (m²)': round(area_m2, 1), 'Becsült lakosság': round(pop, 1)})
     return clean_mask, buildings
 
 # ==========================================
-# 4. STREAMLIT UI
+# 3. STREAMLIT UI
 # ==========================================
-st.set_page_config(page_title="Lakosság AI (PyTorch)", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="Lakosság AI (ResNet34)", layout="wide", page_icon="🛰️")
 st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 st.sidebar.header("⚙️ Beállítások")
 source_option = st.sidebar.radio("Adatforrás kiválasztása:", ("Műholdas Kereső", "Saját kép feltöltése"))
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.500, 0.005)
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.400, 0.050) # Kicsit lejjebb vettük az alapértelmezést
 
 img_to_process = None
 current_lat, current_zoom = None, None
@@ -152,7 +115,7 @@ else:
         st.success("Kép sikeresen feltöltve!")
 
 # ==========================================
-# 5. KÖZÖS ELEMZÉSI LOGIKA
+# 4. KÖZÖS ELEMZÉSI LOGIKA
 # ==========================================
 inference_transforms = A.Compose([
     A.Resize(512, 512),
@@ -161,33 +124,34 @@ inference_transforms = A.Compose([
 
 if img_to_process:
     with st.spinner("AI elemzés futtatása..."):
-        img_np = np.array(img_to_process) # RGB formátum
+        img_np = np.array(img_to_process) 
 
-        # 1. Előfeldolgozás Albumentations segítségével
+        # Előfeldolgozás
         aug = inference_transforms(image=img_np)
-        
-        # 2. Float konverzió és Batch dimenzió hozzáadása
         model, device = load_pytorch_model()
+        
+        # Tenzor előkészítése és normalizálása 0-1 közé (PyTorch standard)
         input_t = aug["image"].float().unsqueeze(0).to(device)
+        input_t = input_t / 255.0
 
         with torch.no_grad():
             output = model(input_t)
             prob = torch.sigmoid(output).cpu().numpy()[0, 0] 
             
-            # --- DEBUG INFORMÁCIÓ ---
+            # DEBUG INFORMÁCIÓ 
             st.warning(f"🔍 DEBUG: Max valószínűség: {prob.max():.4f} | Min: {prob.min():.4f}")
             
-            # 3. Küszöbérték (Threshold) közvetlen alkalmazása az oldalsávról
+            # Küszöbérték alkalmazása
             mask = (prob > threshold).astype(np.uint8)
             
-            # 4. Morfológiai szűrés (apró zajok és lyukak eltüntetése)
+            # Morfológiai szűrés (zajok eltüntetése)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
             
-            # 5. Népességbecslés és poligonok tisztítása
+            # Népességbecslés
             final_mask, buildings_data = analyze_and_clean_mask(mask, current_lat, current_zoom)
             
-            # 6. Megjelenítés - Zöld réteg ráhúzása a képre
+            # Megjelenítés
             overlay = img_np.copy()
             overlay[final_mask == 1] = [0, 255, 0]
             res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
