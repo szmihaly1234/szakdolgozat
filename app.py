@@ -65,8 +65,8 @@ class UNet(nn.Module):
 # ==========================================
 # 2. MODELL BETÖLTÉSE
 # ==========================================
-PT_MODEL_FILE_ID = "1GtvejvLLhNAUHe1oMz9I7BlNXLBDAxCd" 
-PT_MODEL_PATH = "unet_building_segmentation_paris_2.pth"
+PT_MODEL_FILE_ID = "1Pn5gSZSQ9D3CEGHKsnmXRGo3dt7dhMnT" 
+PT_MODEL_PATH = "best_resnet34_unet.pth"
 
 @st.cache_resource(show_spinner="AI Modell letöltése...")
 def load_pytorch_model():
