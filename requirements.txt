@@ -8,3 +8,4 @@ requests
 numpy
 pillow
 albumentations
+segmentation_models_pytorch
