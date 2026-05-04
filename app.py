@@ -120,7 +120,7 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 st.sidebar.header("⚙️ Beállítások")
 source_option = st.sidebar.radio("Adatforrás kiválasztása:", ("Műholdas Kereső", "Saját kép feltöltése"))
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.500, 0.005) # Alapérték módosítva 0.5-re
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.500, 0.005)
 
 img_to_process = None
 current_lat, current_zoom = None, None
@@ -172,8 +172,10 @@ if img_to_process:
 
         with torch.no_grad():
             output = model(input_t)
-            # A sigmoid már garantáltan 0.0 és 1.0 közötti abszolút valószínűséget ad
             prob = torch.sigmoid(output).cpu().numpy()[0, 0] 
+            
+            # --- DEBUG INFORMÁCIÓ ---
+            st.warning(f"🔍 DEBUG: Max valószínűség: {prob.max():.4f} | Min: {prob.min():.4f}")
             
             # 3. Küszöbérték (Threshold) közvetlen alkalmazása az oldalsávról
             mask = (prob > threshold).astype(np.uint8)
