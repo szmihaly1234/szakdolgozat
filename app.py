@@ -11,9 +11,11 @@ import math
 from PIL import Image
 from io import BytesIO
 from geopy.geocoders import ArcGIS
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 # ==========================================
-# 1. ARCHITEKTÚRA DEFINÍCIÓ (U-Net) - Változatlan
+# 1. ARCHITEKTÚRA DEFINÍCIÓ (U-Net)
 # ==========================================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -61,7 +63,7 @@ class UNet(nn.Module):
         return self.out(c1)
 
 # ==========================================
-# 2. MODELL BETÖLTÉSE - Változatlan
+# 2. MODELL BETÖLTÉSE
 # ==========================================
 PT_MODEL_FILE_ID = "1GtvejvLLhNAUHe1oMz9I7BlNXLBDAxCd" 
 PT_MODEL_PATH = "unet_building_segmentation_paris_2.pth"
@@ -118,7 +120,7 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 st.sidebar.header("⚙️ Beállítások")
 source_option = st.sidebar.radio("Adatforrás kiválasztása:", ("Műholdas Kereső", "Saját kép feltöltése"))
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.500, 0.995, 0.950, 0.005)
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.500, 0.005) # Alapérték módosítva 0.5-re
 
 img_to_process = None
 current_lat, current_zoom = None, None
@@ -152,40 +154,43 @@ else:
 # ==========================================
 # 5. KÖZÖS ELEMZÉSI LOGIKA
 # ==========================================
+inference_transforms = A.Compose([
+    A.Resize(512, 512),
+    ToTensorV2(),
+])
+
 if img_to_process:
     with st.spinner("AI elemzés futtatása..."):
-        img_np = np.array(img_to_process)
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        img_input = img_bgr.astype(np.float32)
+        img_np = np.array(img_to_process) # RGB formátum
 
+        # 1. Előfeldolgozás Albumentations segítségével
+        aug = inference_transforms(image=img_np)
+        
+        # 2. Float konverzió és Batch dimenzió hozzáadása
         model, device = load_pytorch_model()
-        input_t = torch.from_numpy(img_input).permute(2, 0, 1).unsqueeze(0).to(device)
+        input_t = aug["image"].float().unsqueeze(0).to(device)
 
         with torch.no_grad():
             output = model(input_t)
-            prob = torch.sigmoid(output).cpu().numpy()[0, 0]
+            # A sigmoid már garantáltan 0.0 és 1.0 közötti abszolút valószínűséget ad
+            prob = torch.sigmoid(output).cpu().numpy()[0, 0] 
             
-            # Normalizálás és Gamma
-            prob_min, prob_max = prob.min(), prob.max()
-            prob_normalized = (prob - prob_min) / (prob_max - prob_min + 1e-8)
-            prob_gamma = np.power(prob_normalized, 2.0)
+            # 3. Küszöbérték (Threshold) közvetlen alkalmazása az oldalsávról
+            mask = (prob > threshold).astype(np.uint8)
             
-            # OTSU javaslat
-            prob_8bit = (prob_gamma * 255).astype(np.uint8)
-            otsu_ret, _ = cv2.threshold(prob_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            st.info(f"💡 AI Javaslat a küszöbértékre: **{otsu_ret/255.0:.3f}**")
-            
-            mask = (prob_gamma > threshold).astype(np.uint8)
+            # 4. Morfológiai szűrés (apró zajok és lyukak eltüntetése)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
             
+            # 5. Népességbecslés és poligonok tisztítása
             final_mask, buildings_data = analyze_and_clean_mask(mask, current_lat, current_zoom)
             
-            # Megjelenítés
+            # 6. Megjelenítés - Zöld réteg ráhúzása a képre
             overlay = img_np.copy()
             overlay[final_mask == 1] = [0, 255, 0]
             res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
             
+            # UI Frissítés
             c1, c2 = st.columns([1.5, 1])
             with c1:
                 st.image(res_img, caption="Elemzett eredmény", use_container_width=True)
