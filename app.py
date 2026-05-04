@@ -31,14 +31,14 @@ def load_pytorch_model():
     # SMP modell inicializálása
     model = smp.Unet(
         encoder_name="resnet34",
-        encoder_weights=None, # Itt már a te saját betanított súlyaidat használjuk
+        encoder_weights=None,
         in_channels=3,
         classes=1,
         activation=None 
     )
     
     model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
-    model.to(device).eval() # A ResNetnél ez már tökéletesen fog működni
+    model.to(device).eval() 
     return model, device
 
 # ==========================================
@@ -83,7 +83,7 @@ st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 st.sidebar.header("⚙️ Beállítások")
 source_option = st.sidebar.radio("Adatforrás kiválasztása:", ("Műholdas Kereső", "Saját kép feltöltése"))
-threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.400, 0.050) # Kicsit lejjebb vettük az alapértelmezést
+threshold = st.sidebar.slider("Érzékenység (Threshold)", 0.100, 0.995, 0.400, 0.050)
 
 img_to_process = None
 current_lat, current_zoom = None, None
@@ -115,10 +115,12 @@ else:
         st.success("Kép sikeresen feltöltve!")
 
 # ==========================================
-# 4. KÖZÖS ELEMZÉSI LOGIKA
+# 4. KÖZÖS ELEMZÉSI LOGIKA (JAVÍTVA)
 # ==========================================
+# JAVÍTÁS 1: Hozzáadva az ImageNet normalizáció
 inference_transforms = A.Compose([
     A.Resize(512, 512),
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)), 
     ToTensorV2(),
 ])
 
@@ -130,9 +132,10 @@ if img_to_process:
         aug = inference_transforms(image=img_np)
         model, device = load_pytorch_model()
         
-        # Tenzor előkészítése és normalizálása 0-1 közé (PyTorch standard)
+        # Tenzor előkészítése
         input_t = aug["image"].float().unsqueeze(0).to(device)
-        input_t = input_t / 255.0
+        
+        # JAVÍTÁS 2: Kivettük a manuális osztást (input_t = input_t / 255.0)
 
         with torch.no_grad():
             output = model(input_t)
