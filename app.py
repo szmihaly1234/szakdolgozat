@@ -138,4 +138,104 @@ def analyze_and_clean_mask(mask, lat, zoom, original_h, original_w, real_width_m
             b_type, pop = 'Társasház / Intézmény', 45 * (max(8, area_m2/80)/10)
             
         buildings.append({
-            'Típus': b
+            'Típus': b_type, 
+            'Terület (m²)': round(area_m2, 1), 
+            'Becsült lakosság': round(pop, 1)
+        })
+    return clean_mask, buildings
+
+# ==========================================
+# 3. STREAMLIT FELHASZNÁLÓI FELÜLET
+# ==========================================
+st.set_page_config(page_title="Lakosság AI (ResNet34)", layout="wide", page_icon="🛰️")
+st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
+
+st.sidebar.header("⚙️ Beállítások")
+source_option = st.sidebar.radio("Adatforrás kiválasztása:", ("Műholdas Kereső", "Saját kép feltöltése"))
+threshold = st.sidebar.slider("AI Érzékenység (Threshold)", 0.100, 0.995, 0.400, 0.050)
+
+img_to_process = None
+current_lat, current_zoom = None, None
+real_width_m = None
+
+if source_option == "Műholdas Kereső":
+    zoom_level = st.sidebar.select_slider("Műholdkép Zoom szint", options=[18, 19, 20], value=19)
+    query = st.text_input("Helyszín keresése (Cím vagy Település):", "Szeged, Pihenő utca 69")
+    if st.button("Helyszín lekérése és elemzése"):
+        geolocator = ArcGIS()
+        loc = geolocator.geocode(query)
+        if loc:
+            current_lat, current_zoom = loc.latitude, zoom_level
+            n = 2.0 ** zoom_level
+            xtile = int((loc.longitude + 180.0) / 360.0 * n)
+            ytile = int((1.0 - math.asinh(math.tan(math.radians(current_lat))) / math.pi) / 2.0 * n)
+            url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom_level}/{ytile}/{xtile}"
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            if resp.status_code == 200:
+                img_to_process = Image.open(BytesIO(resp.content)).convert("RGB").resize((512, 512))
+            else:
+                st.error("Hiba a műholdkép letöltésekor az ArcGIS szerverről.")
+        else:
+            st.error("A megadott helyszín nem található.")
+
+else:
+    uploaded_file = st.file_uploader("Válassz egy műholdképet (JPG/PNG):", type=['png', 'jpg', 'jpeg'])
+    real_width_m = st.sidebar.number_input(
+        "📏 Kép valós szélessége (méterben):", 
+        min_value=10, max_value=20000, value=300, step=10,
+        help="Add meg, hogy a kép bal szélétől a jobb széléig hány méter a távolság a valóságban."
+    )
+    if uploaded_file is not None:
+        img_to_process = Image.open(uploaded_file).convert("RGB")
+        st.success(f"Kép feltöltve: {img_to_process.size[0]}x{img_to_process.size[1]} pixel.")
+
+# ==========================================
+# 4. ELEMZÉS ÉS MEGJELENÍTÉS
+# ==========================================
+
+if img_to_process:
+    with st.spinner("AI elemzés folyamatban (Sliding Window)..."):
+        img_np = np.array(img_to_process)
+        h, w, _ = img_np.shape
+        model, device = load_pytorch_model()
+        
+        # Inferencia: Saját képnél vagy nagy felbontásnál csúszóablakot használunk
+        if source_option == "Saját kép feltöltése" or h > 512 or w > 512:
+            prob_map = sliding_window_inference(model, device, img_np)
+        else:
+            # Fix méretű ArcGIS csempe elemzése
+            inference_transforms = A.Compose([
+                A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+                ToTensorV2(),
+            ])
+            aug = inference_transforms(image=img_np)
+            input_t = aug["image"].float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                prob_map = torch.sigmoid(model(input_t)).cpu().numpy()[0, 0]
+
+        # DEBUG SÁV
+        st.warning(f"🔍 DEBUG: Max valószínűség: {prob_map.max():.4f} | Min: {prob_map.min():.4f}")
+        
+        # Küszöbérték és utómunka
+        mask = (prob_map > threshold).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        
+        # Népességbecslés hívása (Paraméterátadással a méretezéshez)
+        final_mask, buildings_data = analyze_and_clean_mask(mask, current_lat, current_zoom, h, w, real_width_m)
+        
+        # Eredmény kép készítése (Zöld maszk rávetítése)
+        overlay = img_np.copy()
+        overlay[final_mask == 1] = [0, 255, 0]
+        res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
+        
+        # UI Megjelenítés elrendezése
+        c1, c2 = st.columns([1.5, 1])
+        with c1:
+            st.image(res_img, caption="AI által felismert épületek", use_container_width=True)
+        with c2:
+            total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
+            st.metric("👥 Becsült összlakosság", int(total_pop))
+            st.metric("🏠 Felismert épületek", len(buildings_data))
+            if buildings_data:
+                st.dataframe(pd.DataFrame(buildings_data), hide_index=True)
