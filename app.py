@@ -138,7 +138,7 @@ def analyze_and_clean_mask(mask, lat, zoom, original_h, original_w):
             b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
         elif area_m2 < 300:
             b_type, pop = 'Közepes lakóház', 3.2 * max(1, area_m2/100)
-        elif area_m2 < 1000:
+        elif area_m2 < 500:
             b_type, pop = 'Nagy lakóház', 4.1 * max(1, area_m2/100)
         else:
             b_type, pop = 'Társasház / Intézmény', 45 * (max(8, area_m2/80)/10)
