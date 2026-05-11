@@ -40,7 +40,7 @@ def load_pytorch_model():
     model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
     
     # KÖTELEZŐ JAVÍTÁS: .eval() mód a csúszóablakos illesztési hibák elkerülése végett!
-    model.to(device).eval() 
+    model.to(device).train() 
     return model, device
 
 # ==========================================
