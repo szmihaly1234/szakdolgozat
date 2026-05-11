@@ -41,7 +41,7 @@ def load_pytorch_model():
     
     # Domain-shift hack: .train() módban hagyjuk a Batch Normalization rétegek miatt,
     # hogy jobban alkalmazkodjon a magyarországi színekhez/kontrasztokhoz.
-    model.to(device).train() 
+    model.to(device).eval() 
     return model, device
 
 # ==========================================
