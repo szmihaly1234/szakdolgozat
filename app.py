@@ -38,17 +38,89 @@ def load_pytorch_model():
     )
     
     model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
+    # Maradunk a .train() módban a korábbi tapasztalatok alapján (Batch Norm hack)
     model.to(device).train() 
     return model, device
 
 # ==========================================
-# 2. NÉPESSÉGBECSLÉSI LOGIKA
+# 2. CSÚSZÓABLAKOS INFERENCIA ÉS NÉPESSÉGBECSLÉS
 # ==========================================
-def analyze_and_clean_mask(mask, lat, zoom):
-    # Ha feltöltött képünk van (nincs lat/zoom), alapértelmezett méretarányt használunk
+
+def sliding_window_inference(model, device, image_np, window_size=512, stride=384):
+    """
+    Tetszőleges méretű képet elemez 512x512-es ablakokkal, átfedéssel.
+    """
+    h, w, _ = image_np.shape
+    
+    # Normalizáció (Resize nélkül, mert az ablak fix méretű)
+    patch_transform = A.Compose([
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ToTensorV2(),
+    ])
+    
+    # Ha a kép kisebb, mint az ablak, kipótoljuk (padding)
+    pad_h = max(0, window_size - h)
+    pad_w = max(0, window_size - w)
+    if pad_h > 0 or pad_w > 0:
+        image_np = cv2.copyMakeBorder(image_np, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+        h, w, _ = image_np.shape
+
+    # Valószínűségi térkép és számláló (az átlagoláshoz)
+    full_prob_map = np.zeros((h, w), dtype=np.float32)
+    count_map = np.zeros((h, w), dtype=np.float32)
+
+    # Csúszóablak ciklus
+    for y in range(0, h - window_size + 1, stride):
+        for x in range(0, w - window_size + 1, stride):
+            crop = image_np[y:y+window_size, x:x+window_size]
+            input_t = patch_transform(image=crop)["image"].float().unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                output = model(input_t)
+                prob = torch.sigmoid(output).cpu().numpy()[0, 0]
+                
+                full_prob_map[y:y+window_size, x:x+window_size] += prob
+                count_map[y:y+window_size, x:x+window_size] += 1.0
+
+    # Szélek kezelése (ha maradna lefedetlen rész)
+    # Az egyszerűség kedvéért a stride-ot úgy választjuk, hogy lefedje a képet, 
+    # de egy végső ablakot is beiktathatunk a széleken:
+    if (h - window_size) % stride != 0:
+        # Utolsó sor
+        for x in range(0, w - window_size + 1, stride):
+            y = h - window_size
+            crop = image_np[y:y+window_size, x:x+window_size]
+            input_t = patch_transform(image=crop)["image"].float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                prob = torch.sigmoid(model(input_t)).cpu().numpy()[0, 0]
+                full_prob_map[y:y+window_size, x:x+window_size] += prob
+                count_map[y:y+window_size, x:x+window_size] += 1.0
+                
+    if (w - window_size) % stride != 0:
+        # Utolsó oszlop
+        for y in range(0, h - window_size + 1, stride):
+            x = w - window_size
+            crop = image_np[y:y+window_size, x:x+window_size]
+            input_t = patch_transform(image=crop)["image"].float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                prob = torch.sigmoid(model(input_t)).cpu().numpy()[0, 0]
+                full_prob_map[y:y+window_size, x:x+window_size] += prob
+                count_map[y:y+window_size, x:x+window_size] += 1.0
+
+    # Átlagolás és eredeti méret visszaállítása (padding levágása)
+    full_prob_map /= np.maximum(count_map, 1.0)
+    if pad_h > 0 or pad_w > 0:
+        full_prob_map = full_prob_map[:h-pad_h, :w-pad_w]
+        
+    return full_prob_map
+
+def analyze_and_clean_mask(mask, lat, zoom, original_h, original_w):
+    # m_per_px meghatározása
     if lat is None or zoom is None:
-        m_per_px = 0.5 
+        # Saját képnél feltételezzük, hogy kb. 0.3m egy pixel (közepes felbontás)
+        m_per_px = 0.3 
     else:
+        # Keresőnél a csempe 256x256 volt, amit 512-re skáláztunk
         m_per_px = (math.cos(math.radians(lat)) * 40075016.686 / (256 * 2**zoom)) * (256/512)
     
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -62,7 +134,6 @@ def analyze_and_clean_mask(mask, lat, zoom):
         cv2.drawContours(clean_mask, [cnt], -1, 1, thickness=cv2.FILLED)
         area_m2 = area_px * (m_per_px**2)
         
-        # Becslési heurisztika
         if area_m2 < 100:
             b_type, pop = 'Kis lakóház', 2.9 * max(1, area_m2/100)
         elif area_m2 < 300:
@@ -78,7 +149,7 @@ def analyze_and_clean_mask(mask, lat, zoom):
 # ==========================================
 # 3. STREAMLIT UI
 # ==========================================
-st.set_page_config(page_title="Lakosság AI (ResNet34)", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="Lakosság AI (Sliding Window)", layout="wide", page_icon="🛰️")
 st.title("🛰️ Lakosság AI - Műholdas Népességbecslés")
 
 st.sidebar.header("⚙️ Beállítások")
@@ -102,6 +173,7 @@ if source_option == "Műholdas Kereső":
             url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom_level}/{ytile}/{xtile}"
             resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
             if resp.status_code == 200:
+                # Itt megtartjuk az 512-re méretezést, mert a kereső egy fix csempét ad
                 img_to_process = Image.open(BytesIO(resp.content)).convert("RGB").resize((512, 512))
             else:
                 st.error("Hiba a műholdkép letöltésekor.")
@@ -111,61 +183,55 @@ if source_option == "Műholdas Kereső":
 else:
     uploaded_file = st.file_uploader("Válassz egy műholdképet (JPG/PNG):", type=['png', 'jpg', 'jpeg'])
     if uploaded_file is not None:
-        img_to_process = Image.open(uploaded_file).convert("RGB").resize((512, 512))
-        st.success("Kép sikeresen feltöltve!")
+        # SAJÁT KÉPNÉL NEM MÉRETEZÜNK ÁT, csak megnyitjuk
+        img_to_process = Image.open(uploaded_file).convert("RGB")
+        st.success(f"Kép sikeresen feltöltve! Méret: {img_to_process.size[0]}x{img_to_process.size[1]}")
 
 # ==========================================
-# 4. KÖZÖS ELEMZÉSI LOGIKA (JAVÍTVA)
+# 4. ELEMZÉS ÉS MEGJELENÍTÉS
 # ==========================================
-# JAVÍTÁS 1: Hozzáadva az ImageNet normalizáció
-inference_transforms = A.Compose([
-    A.Resize(512, 512),
-    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)), 
-    ToTensorV2(),
-])
 
 if img_to_process:
     with st.spinner("AI elemzés futtatása..."):
-        img_np = np.array(img_to_process) 
-
-        # Előfeldolgozás
-        aug = inference_transforms(image=img_np)
+        img_np = np.array(img_to_process)
+        h, w, _ = img_np.shape
         model, device = load_pytorch_model()
         
-        # Tenzor előkészítése
-        input_t = aug["image"].float().unsqueeze(0).to(device)
-        
-        # JAVÍTÁS 2: Kivettük a manuális osztást (input_t = input_t / 255.0)
+        # Inferencia döntés: ha nagy a kép, vagy saját feltöltés, akkor csúszóablak
+        if source_option == "Saját kép feltöltése" or h > 512 or w > 512:
+            prob_map = sliding_window_inference(model, device, img_np)
+        else:
+            # Sima inferencia a fix 512-es csempére (Kereső esetén)
+            inference_transforms = A.Compose([
+                A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+                ToTensorV2(),
+            ])
+            aug = inference_transforms(image=img_np)
+            input_t = aug["image"].float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                prob_map = torch.sigmoid(model(input_t)).cpu().numpy()[0, 0]
 
-        with torch.no_grad():
-            output = model(input_t)
-            prob = torch.sigmoid(output).cpu().numpy()[0, 0] 
-            
-            # DEBUG INFORMÁCIÓ 
-            st.warning(f"🔍 DEBUG: Max valószínűség: {prob.max():.4f} | Min: {prob.min():.4f}")
-            
-            # Küszöbérték alkalmazása
-            mask = (prob > threshold).astype(np.uint8)
-            
-            # Morfológiai szűrés (zajok eltüntetése)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
-            
-            # Népességbecslés
-            final_mask, buildings_data = analyze_and_clean_mask(mask, current_lat, current_zoom)
-            
-            # Megjelenítés
-            overlay = img_np.copy()
-            overlay[final_mask == 1] = [0, 255, 0]
-            res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
-            
-            # UI Frissítés
-            c1, c2 = st.columns([1.5, 1])
-            with c1:
-                st.image(res_img, caption="Elemzett eredmény", use_container_width=True)
-            with c2:
-                total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
-                st.metric("👥 Becsült összlakosság", int(total_pop))
-                st.metric("🏠 Felismert épületek", len(buildings_data))
-                if buildings_data:
-                    st.dataframe(pd.DataFrame(buildings_data), hide_index=True)
+        # DEBUG ÉS MASZK KÉSZÍTÉS
+        st.warning(f"🔍 DEBUG: Max valószínűség: {prob_map.max():.4f} | Min: {prob_map.min():.4f}")
+        
+        mask = (prob_map > threshold).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        
+        final_mask, buildings_data = analyze_and_clean_mask(mask, current_lat, current_zoom, h, w)
+        
+        # Overlay rajzolása
+        overlay = img_np.copy()
+        overlay[final_mask == 1] = [0, 255, 0]
+        res_img = cv2.addWeighted(img_np, 0.6, overlay, 0.4, 0)
+        
+        # Eredmények kijelzése
+        c1, c2 = st.columns([1.5, 1])
+        with c1:
+            st.image(res_img, caption="Elemzett terület (Zöld = Felismert épület)", use_container_width=True)
+        with c2:
+            total_pop = sum(b['Becsült lakosság'] for b in buildings_data)
+            st.metric("👥 Becsült összlakosság", int(total_pop))
+            st.metric("🏠 Felismert épületek", len(buildings_data))
+            if buildings_data:
+                st.dataframe(pd.DataFrame(buildings_data), hide_index=True)
