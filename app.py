@@ -28,7 +28,6 @@ def load_pytorch_model():
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # SMP modell inicializálása (ResNet34 kódolóval)
     model = smp.Unet(
         encoder_name="resnet34",
         encoder_weights=None, 
@@ -39,7 +38,6 @@ def load_pytorch_model():
     
     model.load_state_dict(torch.load(PT_MODEL_PATH, map_location=device))
     
-    # KÖTELEZŐ JAVÍTÁS: .eval() mód a csúszóablakos illesztési hibák elkerülése végett!
     model.to(device).train() 
     return model, device
 
@@ -54,7 +52,6 @@ def sliding_window_inference(model, device, image_np, window_size=512, stride=25
     """
     H_orig, W_orig, _ = image_np.shape
     
-    # 1. Matematikailag tökéletes padding (kibővítés) kiszámítása
     pad_h = 0
     if H_orig < window_size:
         pad_h = window_size - H_orig
@@ -67,7 +64,6 @@ def sliding_window_inference(model, device, image_np, window_size=512, stride=25
     elif (W_orig - window_size) % stride != 0:
         pad_w = stride - ((W_orig - window_size) % stride)
 
-    # 2. Kép kibővítése tükrözéssel (BORDER_REFLECT) a folytonos átmenetért
     if pad_h > 0 or pad_w > 0:
         image_padded = cv2.copyMakeBorder(image_np, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
     else:
@@ -83,7 +79,7 @@ def sliding_window_inference(model, device, image_np, window_size=512, stride=25
         ToTensorV2(),
     ])
 
-    # 3. Csúszóablak futtatása (Garantáltan végigmegy a kibővített képen)
+    # 3. Csúszóablak futtatása
     for y in range(0, H_pad - window_size + 1, stride):
         for x in range(0, W_pad - window_size + 1, stride):
             crop = image_padded[y:y+window_size, x:x+window_size]
@@ -94,7 +90,7 @@ def sliding_window_inference(model, device, image_np, window_size=512, stride=25
                 full_prob_map[y:y+window_size, x:x+window_size] += prob
                 count_map[y:y+window_size, x:x+window_size] += 1.0
 
-    # Átlagolás a pontos átfedések (stride) miatt
+    # Átlagolás a pontos átfedések miatt
     full_prob_map /= np.maximum(count_map, 1.0)
     
     # 4. Visszavágás az eredeti, feltöltött kép méretére!
